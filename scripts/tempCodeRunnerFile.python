@@ -1,0 +1,2 @@
+yy, xx = np.unravel_index(np.nanargmax(img), img.shape)
+            ax.plot([xx], [yy], marker="x", markersize=8)

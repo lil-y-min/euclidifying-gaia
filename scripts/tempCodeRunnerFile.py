@@ -1,0 +1,1 @@
+outcsv = OUTDIR / f"euclid_xmatch_gaia_{tag}.csv"

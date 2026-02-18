@@ -1,0 +1,147 @@
+import pandas as pd
+import sqlutilpy
+from pathlib import Path
+
+# ----------------------------
+# PATHS (relative to project)
+# ----------------------------
+BASE = Path(__file__).resolve().parents[1]   # .../Codes
+OUTDIR = BASE / "output"
+OUTDIR.mkdir(exist_ok=True)
+
+OUTCSV = OUTDIR / "gaia_anomalies_to_euclid_vis_cstar.csv"
+
+# ----------------------------
+# CONNECTION
+# ----------------------------
+CONN = dict(host="wsdb.ast.cam.ac.uk", db="wsdb", user="yasmine_nourlil_2026")
+
+EUCLID_TABLE = "euclid_ero.merge_cat"
+GAIA_TABLE   = "gaia_dr3.gaia_source"
+GSPC_TABLE   = "gaia_dr3_aux.synthetic_photometry_gspc"  # contains c_star
+
+# Euclid VIS sky coords (confirmed)
+EUCLID_RA  = "v_alpha_j2000"
+EUCLID_DEC = "v_delta_j2000"
+
+# ----------------------------
+# SETTINGS
+# ----------------------------
+N_KEEP = 2000
+R_ARCSEC = 1.0
+
+# magnitude range (avoid super bright saturation + very faint issues at first)
+G_MIN = 10.0
+G_MAX = 21.0
+
+# anomaly thresholds (still fairly permissive; we'll validate + tighten)
+RUWE_MIN = 1.2
+IPD_MULTI_PEAK_MIN_PERCENT = 20   
+CSTAR_MIN = 0.10                  
+
+# ----------------------------
+# 1) Connection test
+# ----------------------------
+(x,) = sqlutilpy.get("select 1", **CONN)
+print("Connected:", x[0])
+print("Using Euclid RA/Dec:", EUCLID_RA, EUCLID_DEC)
+print("Output:", OUTCSV)
+
+# ----------------------------
+# 2) Gaia-first anomalies (using c_star when available)
+# ----------------------------
+# Notes:
+# - c_star exists only for sources in GSPC (not all Gaia sources).
+# - We'll LEFT JOIN so we keep Gaia sources even if c_star is missing.
+# - We treat ipd_frac_multi_peak as percent-like (0..100) based on your validation.
+anomaly_where = f"""
+(
+    (g.ruwe > {RUWE_MIN})
+ OR (g.ipd_frac_multi_peak > {IPD_MULTI_PEAK_MIN_PERCENT})
+ OR (sp.c_star > {CSTAR_MIN})
+)
+"""
+
+sql = f"""
+with gaia_in_euclid as (
+    select
+        g.source_id,
+        g.ra,
+        g.dec,
+        g.phot_g_mean_mag as gaia_gmag,
+        g.bp_rp as gaia_bp_rp,
+        g.phot_bp_rp_excess_factor,
+        g.ruwe as gaia_ruwe,
+        g.ipd_frac_multi_peak,
+        sp.c_star
+
+    from {GAIA_TABLE} g
+    left join {GSPC_TABLE} sp
+        on sp.source_id = g.source_id
+
+    where
+        g.phot_g_mean_mag between {G_MIN} and {G_MAX}
+        and {anomaly_where}
+        and exists (
+            select 1
+            from {EUCLID_TABLE} e
+            where q3c_join(g.ra, g.dec, e.{EUCLID_RA}, e.{EUCLID_DEC}, {R_ARCSEC}/3600.0)
+        )
+    order by g.source_id
+    limit {N_KEEP}
+)
+select
+    gc.source_id as gaia_source_id,
+    gc.ra as gaia_ra,
+    gc.dec as gaia_dec,
+    gc.gaia_gmag,
+    gc.gaia_bp_rp,
+    gc.phot_bp_rp_excess_factor,
+    gc.gaia_ruwe,
+    gc.ipd_frac_multi_peak,
+    (gc.ipd_frac_multi_peak * 0.01) as ipd_frac_multi_peak_scaled,
+    gc.c_star,
+
+    ee.{EUCLID_RA}  as euclid_ra,
+    ee.{EUCLID_DEC} as euclid_dec,
+    ee.v_mag_iso,
+    ee.v_mag_isocor,
+    ee.v_magerr_iso,
+    ee.v_flux_iso,
+    ee.v_fluxerr_iso,
+
+    q3c_dist(gc.ra, gc.dec, ee.{EUCLID_RA}, ee.{EUCLID_DEC}) * 3600.0 as match_dist_arcsec
+
+from gaia_in_euclid gc
+join lateral (
+    select *
+    from {EUCLID_TABLE} ee
+    where q3c_join(gc.ra, gc.dec, ee.{EUCLID_RA}, ee.{EUCLID_DEC}, {R_ARCSEC}/3600.0)
+    order by q3c_dist(gc.ra, gc.dec, ee.{EUCLID_RA}, ee.{EUCLID_DEC})
+    limit 1
+) ee on true
+;
+"""
+
+res = sqlutilpy.get(sql, **CONN)
+
+cols = [
+    "gaia_source_id","gaia_ra","gaia_dec","gaia_gmag","gaia_bp_rp",
+    "phot_bp_rp_excess_factor","gaia_ruwe","ipd_frac_multi_peak","ipd_frac_multi_peak_scaled","c_star",
+    "euclid_ra","euclid_dec","v_mag_iso","v_mag_isocor","v_magerr_iso","v_flux_iso","v_fluxerr_iso",
+    "match_dist_arcsec"
+]
+
+df = pd.DataFrame({c: a for c, a in zip(cols, res)})
+
+# types
+df["gaia_source_id"] = pd.to_numeric(df["gaia_source_id"], errors="coerce").astype("Int64")
+for c in ["gaia_gmag","gaia_bp_rp","phot_bp_rp_excess_factor","gaia_ruwe","ipd_frac_multi_peak","ipd_frac_multi_peak_scaled","c_star","match_dist_arcsec"]:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+
+df.to_csv(OUTCSV, index=False)
+
+print("Saved:", OUTCSV)
+print("Rows:", len(df))
+print("c_star available (non-null):", int(df["c_star"].notna().sum()))
+print(df.head(10))
