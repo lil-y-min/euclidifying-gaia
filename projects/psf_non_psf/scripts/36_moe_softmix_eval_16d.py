@@ -1,0 +1,1 @@
+../../../scripts/main/36_moe_softmix_eval_16d.py

@@ -1,0 +1,1 @@
+../../../scripts/main/26_plot_three_cluster_stamp_comparison.py

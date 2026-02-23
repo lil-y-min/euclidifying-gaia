@@ -18,29 +18,37 @@ from common import ensure_dirs, image_moments, load_manifest, open_split_memmaps
 
 
 class Encoder(nn.Module):
-    def __init__(self, n_feat: int, z_dim: int):
+    def __init__(self, n_feat: int, z_dim: int, width: int = 2):
         super().__init__()
+        c1 = 16 * width
+        c2 = 32 * width
+        xh = 64 * width
+        fh = 256 * width
         self.enc_img = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(1, c1, kernel_size=3, stride=2, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(c1, c2, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c2, c2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
             nn.Flatten(),
         )
         self.enc_x = nn.Sequential(
-            nn.Linear(n_feat, 64),
+            nn.Linear(n_feat, xh),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 64),
+            nn.Linear(xh, xh),
+            nn.ReLU(inplace=True),
+            nn.Linear(xh, xh),
             nn.ReLU(inplace=True),
         )
         self.fuse = nn.Sequential(
-            nn.Linear(32 * 5 * 5 + 64, 256),
+            nn.Linear(c2 * 5 * 5 + xh, fh),
             nn.ReLU(inplace=True),
-            nn.Linear(256, 128),
+            nn.Linear(fh, fh // 2),
             nn.ReLU(inplace=True),
         )
-        self.mu = nn.Linear(128, z_dim)
-        self.logvar = nn.Linear(128, z_dim)
+        self.mu = nn.Linear(fh // 2, z_dim)
+        self.logvar = nn.Linear(fh // 2, z_dim)
 
     def forward(self, y_flat: torch.Tensor, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         y = y_flat.view(y_flat.shape[0], 1, 20, 20)
@@ -51,25 +59,42 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, n_feat: int, z_dim: int):
+    def __init__(self, n_feat: int, z_dim: int, width: int = 2):
         super().__init__()
-        self.inp = nn.Sequential(
-            nn.Linear(n_feat + z_dim, 256),
+        c0 = 64 * width
+        c1 = 32 * width
+        c2 = 16 * width
+        fh = 256 * width
+        xh = 64 * width
+        self.cond_x = nn.Sequential(
+            nn.Linear(n_feat, xh),
             nn.ReLU(inplace=True),
-            nn.Linear(256, 64 * 5 * 5),
+            nn.Linear(xh, xh),
+            nn.ReLU(inplace=True),
+        )
+        self.inp = nn.Sequential(
+            nn.Linear(xh + z_dim, fh),
+            nn.ReLU(inplace=True),
+            nn.Linear(fh, c0 * 5 * 5),
             nn.ReLU(inplace=True),
         )
         self.dec = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+            nn.ConvTranspose2d(c0, c1, kernel_size=4, stride=2, padding=1),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(c1, c1, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(16, 1, kernel_size=3, padding=1),
+            nn.ConvTranspose2d(c1, c2, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c2, c2, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c2, 1, kernel_size=3, padding=1),
         )
 
     def forward(self, z: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        h = self.inp(torch.cat([z, x], dim=1))
-        h = h.view(h.shape[0], 64, 5, 5)
+        xh = self.cond_x(x)
+        h = self.inp(torch.cat([z, xh], dim=1))
+        c0 = h.shape[1] // 25
+        h = h.view(h.shape[0], c0, 5, 5)
         y = self.dec(h).view(h.shape[0], -1)
         y = nn.functional.softplus(y)
         y = y / (torch.sum(y, dim=1, keepdim=True) + 1e-12)
@@ -77,10 +102,10 @@ class Decoder(nn.Module):
 
 
 class CVAE(nn.Module):
-    def __init__(self, n_feat: int, z_dim: int):
+    def __init__(self, n_feat: int, z_dim: int, width: int = 2):
         super().__init__()
-        self.enc = Encoder(n_feat, z_dim)
-        self.dec = Decoder(n_feat, z_dim)
+        self.enc = Encoder(n_feat, z_dim, width=width)
+        self.dec = Decoder(n_feat, z_dim, width=width)
         self.z_dim = z_dim
 
     def mean_pred(self, x: torch.Tensor) -> torch.Tensor:
@@ -116,6 +141,10 @@ def rmse_rows(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.sqrt(np.mean((a - b) ** 2, axis=1))
 
 
+def zrms_rows(z: np.ndarray) -> np.ndarray:
+    return np.sqrt(np.mean(z * z, axis=1))
+
+
 def summarize(v: np.ndarray) -> Dict[str, float]:
     vv = v[np.isfinite(v)]
     if vv.size == 0:
@@ -142,7 +171,7 @@ def predict_flux(X: np.ndarray, mode: str, flux_model_path: str, yflux_true: np.
     return out
 
 
-def gallery(path: Path, true_img: np.ndarray, pred_img: np.ndarray, resid: np.ndarray, title: str, vmax_abs: float = 10.0) -> None:
+def gallery(path: Path, true_img: np.ndarray, pred_img: np.ndarray, zmap: np.ndarray, title: str, vmax_abs: float = 10.0) -> None:
     n = true_img.shape[0]
     if n == 0:
         return
@@ -156,11 +185,11 @@ def gallery(path: Path, true_img: np.ndarray, pred_img: np.ndarray, resid: np.nd
     for i in range(n):
         t = true_img[i].reshape(pix, pix)
         p = pred_img[i].reshape(pix, pix)
-        z = resid[i].reshape(pix, pix)
+        z = zmap[i].reshape(pix, pix)
         for j, im, ttl, cmap, vmin, vmax in [
             (0, t, "TRUE", "magma", None, None),
             (1, p, "PRED", "magma", None, None),
-            (2, z, "RESID", "coolwarm", -vmax_abs, vmax_abs),
+            (2, z, "Z", "coolwarm", -vmax_abs, vmax_abs),
         ]:
             ax = axes[i, j]
             m = ax.imshow(im, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
@@ -209,7 +238,8 @@ def main() -> None:
     c = torch.load(args.cvae_ckpt, map_location=device)
     n_feat = int(c.get("n_features", manifest.n_features))
     z_dim = int(c.get("z_dim", 16))
-    model = CVAE(n_feat, z_dim).to(device)
+    model_width = int(c.get("model_width", 2))
+    model = CVAE(n_feat, z_dim, width=model_width).to(device)
     model.load_state_dict(c["state_dict"])
     model.eval()
 
@@ -248,6 +278,7 @@ def main() -> None:
     resid_mean = I_mean - I_true
     sig2 = np.maximum(args.alpha * np.maximum(I_true, 0.0) + args.sigma0 ** 2, 1e-30)
     z_mean = resid_mean / np.sqrt(sig2)
+    z_rms_mean = zrms_rows(z_mean)
 
     moms_t = image_moments(Yshape, manifest.stamp_pix)
     moms_m = image_moments(y_mean, manifest.stamp_pix)
@@ -261,6 +292,7 @@ def main() -> None:
         "flux_mode": args.flux_mode,
         "rmse_shape_mean": float(np.mean(rmse_mean)),
         "rmse_shape_bestofN": float(np.mean(rmse_best)),
+        "z_rms_mean_pred": summarize(z_rms_mean),
         "ell_true": summarize(moms_t["ell"]),
         "ell_mean_pred": summarize(moms_m["ell"]),
         "ell_bestofN_pred": summarize(moms_b["ell"]),
@@ -287,6 +319,7 @@ def main() -> None:
                 "sigma_true": float(moms_t["sigma"][i]),
                 "sigma_mean": float(moms_m["sigma"][i]),
                 "sigma_bestofN": float(moms_b["sigma"][i]),
+                "z_rms_mean": float(z_rms_mean[i]),
             }
         )
     with open(out_dir / "per_object.csv", "w", newline="", encoding="utf-8") as f:
@@ -297,13 +330,23 @@ def main() -> None:
 
     rng = np.random.default_rng(123)
     k = min(int(args.gallery_n), n)
-    idx_best = np.argsort(rmse_mean)[:k]
-    idx_worst = np.argsort(rmse_mean)[-k:]
+    # Rank galleries by sigma-normalized residual amplitude, not RMSE.
+    idx_best = np.argsort(z_rms_mean)[:k]
+    idx_worst = np.argsort(z_rms_mean)[-k:]
     idx_rand = rng.choice(n, size=k, replace=False) if n > 0 else np.array([], dtype=int)
 
-    gallery(plot_dir / "best_true_pred_z.png", I_true[idx_best], I_mean[idx_best], z_mean[idx_best], "Best by mean-pred RMSE", vmax_abs=10.0)
-    gallery(plot_dir / "worst_true_pred_z.png", I_true[idx_worst], I_mean[idx_worst], z_mean[idx_worst], "Worst by mean-pred RMSE", vmax_abs=10.0)
+    gallery(plot_dir / "best_true_pred_z.png", I_true[idx_best], I_mean[idx_best], z_mean[idx_best], "Best by z-RMS (sigma-normalized residual)", vmax_abs=10.0)
+    gallery(plot_dir / "worst_true_pred_z.png", I_true[idx_worst], I_mean[idx_worst], z_mean[idx_worst], "Worst by z-RMS (sigma-normalized residual)", vmax_abs=10.0)
     gallery(plot_dir / "random_true_pred_z.png", I_true[idx_rand], I_mean[idx_rand], z_mean[idx_rand], "Random sample", vmax_abs=10.0)
+
+    plt.figure(figsize=(6.4, 4.4))
+    plt.hist(z_rms_mean[np.isfinite(z_rms_mean)], bins=90)
+    plt.xlabel("z-RMS per object")
+    plt.ylabel("Count")
+    plt.title("Sigma-normalized residual amplitude")
+    plt.tight_layout()
+    plt.savefig(plot_dir / "z_rms_hist.png", dpi=150)
+    plt.close()
 
     plt.figure(figsize=(6.4, 4.4))
     plt.hist(moms_t["ell"], bins=80, alpha=0.45, label="true")

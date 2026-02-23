@@ -1,0 +1,1 @@
+../../../scripts/main/03_inspect_stamp_size.py

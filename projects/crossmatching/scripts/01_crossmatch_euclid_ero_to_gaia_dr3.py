@@ -1,0 +1,1 @@
+../../../scripts/main/01_crossmatch_euclid_ero_to_gaia_dr3.py

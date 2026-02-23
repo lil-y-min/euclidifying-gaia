@@ -1,0 +1,1 @@
+../../../scripts/main/34_embed_double_stars_pixels.py

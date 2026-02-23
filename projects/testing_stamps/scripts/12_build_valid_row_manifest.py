@@ -1,0 +1,1 @@
+../../../scripts/main/12_build_valid_row_manifest.py

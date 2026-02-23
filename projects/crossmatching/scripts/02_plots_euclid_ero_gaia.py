@@ -1,0 +1,1 @@
+../../../scripts/main/02_plots_euclid_ero_gaia.py

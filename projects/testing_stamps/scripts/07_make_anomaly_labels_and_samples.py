@@ -1,0 +1,1 @@
+../../../scripts/main/07_make_anomaly_labels_and_samples.py

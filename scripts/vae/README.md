@@ -43,7 +43,7 @@ python -u scripts/vae/02_train_flux_mlp.py \
 python -u scripts/vae/03_train_cvae_shape.py \
   --manifest output/ml_runs/ml_xgb_pixelsflux_16d_augtrain_g17/manifest_arrays.npz \
   --run_name cvae_shape_16d_g17_z16 \
-  --z_dim 16 --epochs 60 --batch_size 256 \
+  --z_dim 16 --model_width 2 --epochs 60 --batch_size 256 \
   --beta_max 1.0 --beta_warmup_frac 0.35
 ```
 

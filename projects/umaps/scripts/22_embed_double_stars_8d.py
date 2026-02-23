@@ -1,0 +1,1 @@
+../../../scripts/main/22_embed_double_stars_8d.py

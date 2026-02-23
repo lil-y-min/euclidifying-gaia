@@ -1,0 +1,1 @@
+../../../scripts/main/20_chi2_2d_hist.py

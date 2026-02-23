@@ -248,6 +248,35 @@ def load_psf_source_ids(labels_csv: Path, label_keep: int) -> np.ndarray:
     return keep
 
 
+def load_weight_source_ids(
+    labels_csv: Path,
+    label_target: int,
+    min_confidence: float,
+) -> np.ndarray:
+    cols = ["source_id", "label"]
+    use_conf = np.isfinite(min_confidence)
+    if use_conf:
+        cols.append("confidence")
+    df = pd.read_csv(labels_csv, usecols=cols)
+    df["source_id"] = pd.to_numeric(df["source_id"], errors="coerce")
+    df["label"] = pd.to_numeric(df["label"], errors="coerce")
+    if use_conf:
+        df["confidence"] = pd.to_numeric(df["confidence"], errors="coerce")
+    df = df.dropna(subset=["source_id", "label"]).copy()
+    df["source_id"] = df["source_id"].astype(np.int64)
+    df["label"] = df["label"].astype(np.int64)
+    m = (df["label"] == int(label_target))
+    if use_conf:
+        m &= np.isfinite(df["confidence"]) & (df["confidence"] >= float(min_confidence))
+    keep = df.loc[m, "source_id"].drop_duplicates().to_numpy(dtype=np.int64)
+    if keep.size == 0:
+        conf_txt = "none" if (not use_conf) else f">={float(min_confidence):.3f}"
+        raise RuntimeError(
+            f"No source_id found in {labels_csv} for label={label_target} with confidence {conf_txt}"
+        )
+    return keep
+
+
 def count_rows(
     meta_path: Path,
     valid_path: Path,
@@ -322,6 +351,8 @@ def open_memmaps(array_dir: Path, n_train: int, n_val: int, n_test: int, n_feat:
         X_val=np.memmap(array_dir / "X_val.mmap", dtype="float32", mode="w+", shape=(n_val, n_feat)),
         Yshape_val=np.memmap(array_dir / "Yshape_val.mmap", dtype="float32", mode="w+", shape=(n_val, D)),
         Yflux_val=np.memmap(array_dir / "Yflux_val.mmap", dtype="float32", mode="w+", shape=(n_val,)),
+        W_train=np.memmap(array_dir / "W_train.mmap", dtype="float32", mode="w+", shape=(n_train,)),
+        W_val=np.memmap(array_dir / "W_val.mmap", dtype="float32", mode="w+", shape=(n_val,)),
         X_test=np.memmap(array_dir / "X_test.mmap", dtype="float32", mode="w+", shape=(n_test, n_feat)),
         Yshape_test=np.memmap(array_dir / "Yshape_test.mmap", dtype="float32", mode="w+", shape=(n_test, D)),
         Yflux_test=np.memmap(array_dir / "Yflux_test.mmap", dtype="float32", mode="w+", shape=(n_test,)),
@@ -348,6 +379,8 @@ def fill_arrays_for_meta_pixelsflux(
     label: str,
     trace_test_writer: Optional[csv.DictWriter],
     source_ids_keep: Optional[np.ndarray] = None,
+    source_ids_weighted: Optional[np.ndarray] = None,
+    nonpsf_weight: float = 1.0,
 ):
     print("\n" + "-" * 90)
     print("DATASET:", label)
@@ -360,7 +393,8 @@ def fill_arrays_for_meta_pixelsflux(
 
     head = pd.read_csv(meta_path, nrows=0, engine="python")
     g_col = pick_gaia_g_col(head.columns.tolist())
-    if (source_ids_keep is not None) and ("source_id" not in head.columns):
+    need_source_id = (source_ids_keep is not None) or (source_ids_weighted is not None)
+    if need_source_id and ("source_id" not in head.columns):
         raise RuntimeError(f"PSF filter requested but source_id missing in {meta_path}")
     extra_have = [c for c in extra_maybe if c in head.columns]
     need = base_need + extra_have
@@ -395,7 +429,7 @@ def fill_arrays_for_meta_pixelsflux(
             chunk[c] = pd.to_numeric(chunk[c], errors="coerce")
         if g_col is not None:
             chunk[g_col] = pd.to_numeric(chunk[g_col], errors="coerce")
-        if source_ids_keep is not None:
+        if need_source_id:
             chunk["source_id"] = pd.to_numeric(chunk["source_id"], errors="coerce")
 
         m = (
@@ -473,7 +507,7 @@ def fill_arrays_for_meta_pixelsflux(
             meta_row = sub["meta_row"].to_numpy(dtype=np.int64)
             idx_in_file = sub["index_in_file"].to_numpy(dtype=np.int64)
 
-            sid = sub["source_id"].to_numpy(dtype=object) if "source_id" in sub.columns else None
+            sid = sub["source_id"].to_numpy(dtype=np.float64) if "source_id" in sub.columns else None
             eu_ra = sub["v_alpha_j2000"].to_numpy(dtype=object) if "v_alpha_j2000" in sub.columns else None
             eu_de = sub["v_delta_j2000"].to_numpy(dtype=object) if "v_delta_j2000" in sub.columns else None
             ga_ra = sub["ra"].to_numpy(dtype=object) if "ra" in sub.columns else None
@@ -504,6 +538,20 @@ def fill_arrays_for_meta_pixelsflux(
                 mmaps[f"X_{split_name}"][p0:p0 + n_take] = Xs
                 mmaps[f"Yshape_{split_name}"][p0:p0 + n_take] = Ys
                 mmaps[f"Yflux_{split_name}"][p0:p0 + n_take] = Fs
+                if split_name in ("train", "val"):
+                    wv = np.ones(n_take, dtype=np.float32)
+                    if (source_ids_weighted is not None) and (sid is not None):
+                        sid_s = sid[ms][:n_take]
+                        sid_ok = np.isfinite(sid_s)
+                        if np.any(sid_ok):
+                            w_mask = np.zeros(n_take, dtype=bool)
+                            w_mask[sid_ok] = np.isin(
+                                sid_s[sid_ok].astype(np.int64),
+                                source_ids_weighted,
+                                assume_unique=False,
+                            )
+                            wv[w_mask] = float(nonpsf_weight)
+                    mmaps[f"W_{split_name}"][p0:p0 + n_take] = wv
                 ptrs[split_name] += n_take
 
                 if (split_name == "test") and (trace_test_writer is not None) and (n_take > 0):
@@ -530,7 +578,7 @@ def fill_arrays_for_meta_pixelsflux(
                             "index_in_file": int(iif[i]),
                             "meta_row": int(mr[i]),
                         }
-                        if sid_t is not None: row["source_id"] = sid_t[i]
+                        if sid_t is not None: row["source_id"] = int(sid_t[i]) if np.isfinite(sid_t[i]) else ""
                         if eu_ra_t is not None: row["v_alpha_j2000"] = eu_ra_t[i]
                         if eu_de_t is not None: row["v_delta_j2000"] = eu_de_t[i]
                         if ga_ra_t is not None: row["ra"] = ga_ra_t[i]
@@ -589,6 +637,10 @@ def main():
     ap.add_argument("--gaia_g_mag_min", type=float, default=CFG.gaia_g_mag_min if CFG.gaia_g_mag_min is not None else float("nan"))
     ap.add_argument("--psf_labels_csv", default="", help="Optional labels CSV with source_id,label")
     ap.add_argument("--psf_label_keep", type=int, default=-1, help="0=psf_like, 1=non_psf_like")
+    ap.add_argument("--weight_labels_csv", default="", help="Optional labels CSV for sample weighting by source_id.")
+    ap.add_argument("--weight_label_target", type=int, default=1, help="Label to upweight in --weight_labels_csv.")
+    ap.add_argument("--weight_multiplier", type=float, default=1.0, help="Sample weight multiplier for target label rows.")
+    ap.add_argument("--weight_min_confidence", type=float, default=float("nan"), help="Optional confidence threshold for weighted target rows.")
     args = ap.parse_args()
 
     CFG.feature_set = str(args.feature_set)
@@ -608,6 +660,16 @@ def main():
         if int(args.psf_label_keep) not in (0, 1):
             raise RuntimeError("--psf_label_keep must be 0 or 1 when --psf_labels_csv is provided.")
         source_ids_keep = load_psf_source_ids(Path(args.psf_labels_csv), int(args.psf_label_keep))
+
+    source_ids_weighted = None
+    if str(args.weight_labels_csv).strip():
+        if float(args.weight_multiplier) < 1.0:
+            raise RuntimeError("--weight_multiplier must be >= 1.0")
+        source_ids_weighted = load_weight_source_ids(
+            labels_csv=Path(args.weight_labels_csv),
+            label_target=int(args.weight_label_target),
+            min_confidence=float(args.weight_min_confidence),
+        )
 
     np.random.seed(CFG.random_seed)
     feature_cols = get_feature_cols(CFG.feature_set)
@@ -642,6 +704,16 @@ def main():
     print("use_aug:", CFG.use_aug, "aug_train_only:", CFG.aug_train_only)
     if source_ids_keep is not None:
         print("PSF label filter enabled:", int(args.psf_label_keep), f"(source_ids={len(source_ids_keep)})")
+    if source_ids_weighted is not None:
+        cval = float(args.weight_min_confidence)
+        ctext = "none" if (not np.isfinite(cval)) else f">={cval:.3f}"
+        print(
+            "Sample weighting enabled:",
+            f"target_label={int(args.weight_label_target)}",
+            f"multiplier={float(args.weight_multiplier):.3f}",
+            f"confidence={ctext}",
+            f"(source_ids={len(source_ids_weighted)})",
+        )
     print("OUT_ROOT:", out_root)
     print("PLOTS   :", plot_dir)
 
@@ -745,6 +817,8 @@ def main():
                 label=task["label"],
                 trace_test_writer=trace_writer,
                 source_ids_keep=source_ids_keep,
+                source_ids_weighted=source_ids_weighted,
+                nonpsf_weight=float(args.weight_multiplier),
             )
 
             elapsed_phase = time.time() - load_phase_t0
@@ -785,6 +859,8 @@ def main():
         X_val_path=str(array_dir / "X_val.mmap"),
         Yshape_val_path=str(array_dir / "Yshape_val.mmap"),
         Yflux_val_path=str(array_dir / "Yflux_val.mmap"),
+        W_train_path=str(array_dir / "W_train.mmap"),
+        W_val_path=str(array_dir / "W_val.mmap"),
         X_test_path=str(array_dir / "X_test.mmap"),
         Yshape_test_path=str(array_dir / "Yshape_test.mmap"),
         Yflux_test_path=str(array_dir / "Yflux_test.mmap"),
@@ -809,6 +885,16 @@ def main():
     X_val = np.memmap(array_dir / "X_val.mmap", dtype="float32", mode="r", shape=(n_val_eff, n_feat))
     Yshape_val = np.memmap(array_dir / "Yshape_val.mmap", dtype="float32", mode="r", shape=(n_val_eff, D))
     Yflux_val = np.memmap(array_dir / "Yflux_val.mmap", dtype="float32", mode="r", shape=(n_val_eff,))
+    W_train = np.memmap(array_dir / "W_train.mmap", dtype="float32", mode="r", shape=(n_train_eff,))
+    W_val = np.memmap(array_dir / "W_val.mmap", dtype="float32", mode="r", shape=(n_val_eff,))
+
+    weight_summary = pd.DataFrame(
+        [
+            {"split": "train", "n": n_train_eff, "weight_mean": float(np.mean(W_train)), "weight_max": float(np.max(W_train)), "weighted_frac": float(np.mean(np.asarray(W_train) > 1.0))},
+            {"split": "val", "n": n_val_eff, "weight_mean": float(np.mean(W_val)), "weight_max": float(np.max(W_val)), "weighted_frac": float(np.mean(np.asarray(W_val) > 1.0))},
+        ]
+    )
+    weight_summary.to_csv(metrics_dir / "sample_weight_summary.csv", index=False)
 
     params = {
         "objective": "reg:squarederror",
@@ -824,8 +910,8 @@ def main():
 
     # ---- Train flux model ----
     print("\n=== TRAINING FLUX MODEL: log10(F) ===")
-    dtrainF = xgb.DMatrix(X_train, label=Yflux_train)
-    dvalF = xgb.DMatrix(X_val, label=Yflux_val)
+    dtrainF = xgb.DMatrix(X_train, label=Yflux_train, weight=W_train)
+    dvalF = xgb.DMatrix(X_val, label=Yflux_val, weight=W_val)
     evals_result_F = {}
     booster_flux = xgb.train(
         params=params,
@@ -843,8 +929,8 @@ def main():
 
     # ---- Train shape pixel models ----
     print(f"\n=== TRAINING SHAPE MODELS (one booster per pixel): D={D} ===")
-    dtrain = xgb.DMatrix(X_train)
-    dval = xgb.DMatrix(X_val)
+    dtrain = xgb.DMatrix(X_train, weight=W_train)
+    dval = xgb.DMatrix(X_val, weight=W_val)
 
     rmse_pix_val = np.full(D, np.nan, dtype=float)
     shape_t0 = time.time()

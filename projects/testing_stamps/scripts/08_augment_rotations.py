@@ -1,0 +1,1 @@
+../../../scripts/main/08_augment_rotations.py
