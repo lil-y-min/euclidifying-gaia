@@ -88,6 +88,22 @@ class RunConfig:
     use_positive_only: bool = True
     eps_integral: float = 1e-12
     gaia_g_mag_min: Optional[float] = 17.0
+    # Optional positional/data-quality filters (applied before split assignment)
+    border_quantile: Optional[float] = None
+    border_x_col: str = "x_pix_round"
+    border_y_col: str = "y_pix_round"
+    max_dist_match: Optional[float] = None
+    # Optional Euclid quality-bit exclusion (from prebuilt quality_flag CSV)
+    quality_flags_csv: str = ""
+    quality_id_col: str = "source_id"
+    quality_flag_col: str = "quality_flag"
+    quality_bits_mask: int = 0
+    quality_drop_unknown_source_id: bool = False
+    # Optional stamp artifact filter for cut/seam-like stamps
+    drop_seam_cuts: bool = False
+    seam_low_threshold: float = 0.0
+    seam_line_frac_min: float = 0.90
+    seam_diag_len_min: int = 8
 
     run_name: str = "ml_xgb_pixelsflux_8d"
     plots_root: Path = None
@@ -215,6 +231,49 @@ def normalize_by_integral(stamps: np.ndarray, use_positive_only: bool, eps: floa
     return out, ok, integ
 
 
+def seam_cut_mask(
+    stamps: np.ndarray,
+    low_threshold: float,
+    line_frac_min: float,
+    diag_len_min: int,
+) -> np.ndarray:
+    """
+    Detect seam/cut-like artifacts directly from raw stamps.
+    A stamp is flagged if a near-zero line spans most of any row/col/diagonal.
+    """
+    if stamps.ndim != 3:
+        raise RuntimeError(f"Expected stamps (N,H,W), got {stamps.shape}")
+    N, H, W = stamps.shape
+    if H != W:
+        # Current pipeline expects square stamps; keep safe fallback.
+        return np.zeros(N, dtype=bool)
+    low = stamps <= float(low_threshold)
+    # Horizontal / vertical line cuts.
+    row_line = np.max(np.mean(low, axis=2), axis=1) >= float(line_frac_min)
+    col_line = np.max(np.mean(low, axis=1), axis=1) >= float(line_frac_min)
+    out = row_line | col_line
+    # Diagonal cuts (both directions), requiring a minimum segment length.
+    n = H
+    diag_flag = np.zeros(N, dtype=bool)
+    min_len = max(2, int(diag_len_min))
+    for i in range(N):
+        if out[i]:
+            continue
+        im = low[i]
+        m = 0.0
+        for k in range(-(n - 1), n):
+            d1 = np.diag(im, k=k)
+            if d1.size >= min_len:
+                m = max(m, float(np.mean(d1)))
+            d2 = np.diag(np.fliplr(im), k=k)
+            if d2.size >= min_len:
+                m = max(m, float(np.mean(d2)))
+            if m >= float(line_frac_min):
+                diag_flag[i] = True
+                break
+    return out | diag_flag
+
+
 def infer_stamp_pix(dataset_root: Path) -> int:
     # Find first npz in first field to infer stamp size
     fields = list_field_dirs(dataset_root, raw_meta_name=RAW_META)
@@ -233,6 +292,34 @@ def pick_gaia_g_col(columns: List[str]) -> Optional[str]:
         if c in columns:
             return c
     return None
+
+
+def get_border_bounds(
+    meta_path: Path,
+    x_col: str,
+    y_col: str,
+    q: float,
+) -> Optional[Tuple[float, float, float, float]]:
+    if (not np.isfinite(q)) or (q <= 0.0) or (q >= 0.5):
+        return None
+    try:
+        xy = pd.read_csv(meta_path, usecols=[x_col, y_col], engine="python")
+    except Exception:
+        return None
+    if (x_col not in xy.columns) or (y_col not in xy.columns):
+        return None
+    x = pd.to_numeric(xy[x_col], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(xy[y_col], errors="coerce").to_numpy(dtype=float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    if not np.any(ok):
+        return None
+    x = x[ok]
+    y = y[ok]
+    x_lo = float(np.quantile(x, q))
+    x_hi = float(np.quantile(x, 1.0 - q))
+    y_lo = float(np.quantile(y, q))
+    y_hi = float(np.quantile(y, 1.0 - q))
+    return (x_lo, x_hi, y_lo, y_hi)
 
 
 def load_psf_source_ids(labels_csv: Path, label_keep: int) -> np.ndarray:
@@ -277,24 +364,75 @@ def load_weight_source_ids(
     return keep
 
 
+def load_bad_quality_source_ids(
+    quality_csv: Path,
+    id_col: str,
+    flag_col: str,
+    bits_mask: int,
+) -> Tuple[np.ndarray, Dict[str, int]]:
+    if int(bits_mask) <= 0:
+        raise RuntimeError("bits_mask must be > 0 for quality filtering.")
+
+    df = pd.read_csv(quality_csv, usecols=[id_col, flag_col])
+    df[id_col] = pd.to_numeric(df[id_col], errors="coerce")
+    df[flag_col] = pd.to_numeric(df[flag_col], errors="coerce")
+    df = df.dropna(subset=[id_col, flag_col]).copy()
+    if len(df) == 0:
+        return np.array([], dtype=np.int64), {"rows_in_csv": 0, "rows_valid": 0, "rows_flagged": 0, "unique_source_ids_flagged": 0}
+
+    sid = df[id_col].to_numpy(dtype=np.int64)
+    qf = df[flag_col].to_numpy(dtype=np.int64)
+    bad = (qf & int(bits_mask)) != 0
+    bad_ids = np.unique(sid[bad]).astype(np.int64)
+    stats = {
+        "rows_in_csv": int(len(df)),
+        "rows_valid": int(len(df)),
+        "rows_flagged": int(np.sum(bad)),
+        "unique_source_ids_flagged": int(bad_ids.size),
+    }
+    return bad_ids, stats
+
+
 def count_rows(
     meta_path: Path,
     valid_path: Path,
     feature_cols: List[str],
     allow_splits: Set[int],
     gaia_g_mag_min: Optional[float],
+    border_bounds: Optional[Tuple[float, float, float, float]] = None,
+    border_x_col: Optional[str] = None,
+    border_y_col: Optional[str] = None,
+    max_dist_match: Optional[float] = None,
     source_ids_keep: Optional[np.ndarray] = None,
+    source_ids_bad_quality: Optional[np.ndarray] = None,
+    quality_drop_unknown_source_id: bool = False,
 ) -> Dict[int, int]:
     head = pd.read_csv(meta_path, nrows=0, engine="python")
     g_col = pick_gaia_g_col(head.columns.tolist())
-    if (source_ids_keep is not None) and ("source_id" not in head.columns):
-        raise RuntimeError(f"PSF filter requested but source_id missing in {meta_path}")
+    need_source_id = (source_ids_keep is not None) or (source_ids_bad_quality is not None)
+    if need_source_id and ("source_id" not in head.columns):
+        raise RuntimeError(f"source_id-based filter requested but source_id missing in {meta_path}")
 
     need = ["npz_file", "index_in_file", "split_code"] + feature_cols
-    if source_ids_keep is not None:
+    if need_source_id:
         need.append("source_id")
     if g_col is not None and g_col not in need:
         need.append(g_col)
+    has_border = (
+        (border_bounds is not None)
+        and (border_x_col is not None)
+        and (border_y_col is not None)
+        and (border_x_col in head.columns)
+        and (border_y_col in head.columns)
+    )
+    if has_border:
+        if border_x_col not in need:
+            need.append(border_x_col)
+        if border_y_col not in need:
+            need.append(border_y_col)
+    has_dist_cut = (max_dist_match is not None) and np.isfinite(float(max_dist_match)) and ("dist_match" in head.columns)
+    if has_dist_cut and ("dist_match" not in need):
+        need.append("dist_match")
     nrows = count_csv_rows_fast(meta_path)
     valid = load_valid_mask(valid_path, nrows=nrows)
 
@@ -312,7 +450,7 @@ def count_rows(
             chunk[c] = pd.to_numeric(chunk[c], errors="coerce")
         if g_col is not None:
             chunk[g_col] = pd.to_numeric(chunk[g_col], errors="coerce")
-        if source_ids_keep is not None:
+        if need_source_id:
             chunk["source_id"] = pd.to_numeric(chunk["source_id"], errors="coerce")
 
         ok = (
@@ -328,9 +466,27 @@ def count_rows(
             if np.any(sid_ok):
                 sid_keep[sid_ok] = np.isin(sid[sid_ok].astype(np.int64), source_ids_keep, assume_unique=False)
             ok &= sid_keep
+        if source_ids_bad_quality is not None:
+            sid = chunk["source_id"].to_numpy(dtype=float)
+            sid_ok = np.isfinite(sid)
+            sid_bad = np.zeros(len(chunk), dtype=bool)
+            if np.any(sid_ok):
+                sid_bad[sid_ok] = np.isin(sid[sid_ok].astype(np.int64), source_ids_bad_quality, assume_unique=False)
+            if bool(quality_drop_unknown_source_id):
+                ok &= sid_ok & (~sid_bad)
+            else:
+                ok &= (~sid_bad)
         if (gaia_g_mag_min is not None) and (g_col is not None):
             g = chunk[g_col].to_numpy(dtype=float)
             ok &= np.isfinite(g) & (g >= float(gaia_g_mag_min))
+        if has_border:
+            x_lo, x_hi, y_lo, y_hi = border_bounds
+            x = pd.to_numeric(chunk[border_x_col], errors="coerce").to_numpy(dtype=float)
+            y = pd.to_numeric(chunk[border_y_col], errors="coerce").to_numpy(dtype=float)
+            ok &= np.isfinite(x) & np.isfinite(y) & (x >= x_lo) & (x <= x_hi) & (y >= y_lo) & (y <= y_hi)
+        if has_dist_cut:
+            d = pd.to_numeric(chunk["dist_match"], errors="coerce").to_numpy(dtype=float)
+            ok &= np.isfinite(d) & (d <= float(max_dist_match))
 
         split = chunk["split_code"].to_numpy()
         for s in allow_splits:
@@ -380,6 +536,7 @@ def fill_arrays_for_meta_pixelsflux(
     trace_test_writer: Optional[csv.DictWriter],
     source_ids_keep: Optional[np.ndarray] = None,
     source_ids_weighted: Optional[np.ndarray] = None,
+    source_ids_bad_quality: Optional[np.ndarray] = None,
     nonpsf_weight: float = 1.0,
 ):
     print("\n" + "-" * 90)
@@ -393,13 +550,30 @@ def fill_arrays_for_meta_pixelsflux(
 
     head = pd.read_csv(meta_path, nrows=0, engine="python")
     g_col = pick_gaia_g_col(head.columns.tolist())
-    need_source_id = (source_ids_keep is not None) or (source_ids_weighted is not None)
+    need_source_id = (source_ids_keep is not None) or (source_ids_weighted is not None) or (source_ids_bad_quality is not None)
     if need_source_id and ("source_id" not in head.columns):
         raise RuntimeError(f"PSF filter requested but source_id missing in {meta_path}")
     extra_have = [c for c in extra_maybe if c in head.columns]
     need = base_need + extra_have
     if g_col is not None and g_col not in need:
         need.append(g_col)
+    border_bounds = get_border_bounds(
+        meta_path,
+        x_col=cfg.border_x_col,
+        y_col=cfg.border_y_col,
+        q=float(cfg.border_quantile) if (cfg.border_quantile is not None) else np.nan,
+    )
+    has_border = (
+        (border_bounds is not None)
+        and (cfg.border_x_col in head.columns)
+        and (cfg.border_y_col in head.columns)
+    )
+    if has_border:
+        if cfg.border_x_col not in need:
+            need.append(cfg.border_x_col)
+        if cfg.border_y_col not in need:
+            need.append(cfg.border_y_col)
+    has_dist_cut = (cfg.max_dist_match is not None) and np.isfinite(float(cfg.max_dist_match)) and ("dist_match" in head.columns)
 
     nrows = count_csv_rows_fast(meta_path)
     valid = load_valid_mask(valid_path, nrows=nrows)
@@ -408,6 +582,7 @@ def fill_arrays_for_meta_pixelsflux(
     offset = 0
     chunk_i = 0
     t0 = time.time()
+    seam_dropped_total = 0
 
     last_npz_path = None
     last_npz_X = None
@@ -446,9 +621,27 @@ def fill_arrays_for_meta_pixelsflux(
             if np.any(sid_ok):
                 sid_keep[sid_ok] = np.isin(sid[sid_ok].astype(np.int64), source_ids_keep, assume_unique=False)
             m &= sid_keep
+        if source_ids_bad_quality is not None:
+            sid = chunk["source_id"].to_numpy(dtype=float)
+            sid_ok = np.isfinite(sid)
+            sid_bad = np.zeros(len(chunk), dtype=bool)
+            if np.any(sid_ok):
+                sid_bad[sid_ok] = np.isin(sid[sid_ok].astype(np.int64), source_ids_bad_quality, assume_unique=False)
+            if bool(cfg.quality_drop_unknown_source_id):
+                m &= sid_ok & (~sid_bad)
+            else:
+                m &= (~sid_bad)
         if (cfg.gaia_g_mag_min is not None) and (g_col is not None):
             g = chunk[g_col].to_numpy(dtype=float)
             m &= np.isfinite(g) & (g >= float(cfg.gaia_g_mag_min))
+        if has_border:
+            x_lo, x_hi, y_lo, y_hi = border_bounds
+            x = pd.to_numeric(chunk[cfg.border_x_col], errors="coerce").to_numpy(dtype=float)
+            y = pd.to_numeric(chunk[cfg.border_y_col], errors="coerce").to_numpy(dtype=float)
+            m &= np.isfinite(x) & np.isfinite(y) & (x >= x_lo) & (x <= x_hi) & (y >= y_lo) & (y <= y_hi)
+        if has_dist_cut:
+            d = pd.to_numeric(chunk["dist_match"], errors="coerce").to_numpy(dtype=float)
+            m &= np.isfinite(d) & (d <= float(cfg.max_dist_match))
         chunk = chunk.loc[m]
         if len(chunk) == 0:
             if (chunk_i == 1) or (chunk_i % 10 == 0) or (offset >= nrows):
@@ -486,6 +679,20 @@ def fill_arrays_for_meta_pixelsflux(
                 continue
 
             stamps = Xall[idxs].astype(np.float32, copy=False)
+            if cfg.drop_seam_cuts:
+                bad_seam = seam_cut_mask(
+                    stamps,
+                    low_threshold=float(cfg.seam_low_threshold),
+                    line_frac_min=float(cfg.seam_line_frac_min),
+                    diag_len_min=int(cfg.seam_diag_len_min),
+                )
+                if np.any(bad_seam):
+                    keep = ~bad_seam
+                    seam_dropped_total += int(np.sum(bad_seam))
+                    sub = sub.iloc[keep]
+                    stamps = stamps[keep]
+                    if stamps.shape[0] == 0:
+                        continue
             stamps_n, ok, integ = normalize_by_integral(stamps, cfg.use_positive_only, cfg.eps_integral)
             sub = sub.iloc[ok]
             stamps_n = stamps_n[ok]
@@ -599,6 +806,9 @@ def fill_arrays_for_meta_pixelsflux(
         if offset >= nrows:
             break
 
+    if cfg.drop_seam_cuts and (seam_dropped_total > 0):
+        print(f"[SEAM FILTER] {label}: dropped {seam_dropped_total} seam/cut-like stamps")
+
 
 def rmse(a: np.ndarray, b: np.ndarray) -> float:
     a = np.asarray(a, dtype=float)
@@ -635,12 +845,26 @@ def main():
     ap.add_argument("--early_stopping_rounds", type=int, default=CFG.early_stopping_rounds)
     ap.add_argument("--learning_rate", type=float, default=CFG.learning_rate)
     ap.add_argument("--gaia_g_mag_min", type=float, default=CFG.gaia_g_mag_min if CFG.gaia_g_mag_min is not None else float("nan"))
+    ap.add_argument("--border_quantile", type=float, default=float("nan"), help="Exclude border rows using x/y quantile bands per metadata file (e.g. 0.01 drops outer 1%% on each side).")
+    ap.add_argument("--border_x_col", type=str, default=CFG.border_x_col)
+    ap.add_argument("--border_y_col", type=str, default=CFG.border_y_col)
+    ap.add_argument("--max_dist_match", type=float, default=float("nan"), help="Optional dist_match upper bound; rows above are excluded.")
+    ap.add_argument("--drop_seam_cuts", action="store_true", help="Drop raw stamps with cut/seam-like lines (row/col/diag near-zero spans).")
+    ap.add_argument("--seam_low_threshold", type=float, default=CFG.seam_low_threshold, help="Pixel threshold used to define seam-line pixels.")
+    ap.add_argument("--seam_line_frac_min", type=float, default=CFG.seam_line_frac_min, help="Minimum fraction of low pixels along a row/col/diag to flag seam.")
+    ap.add_argument("--seam_diag_len_min", type=int, default=CFG.seam_diag_len_min, help="Minimum diagonal length considered for seam detection.")
+    ap.add_argument("--count_only", action="store_true", help="Only compute and print train/val/test counts after filtering, then exit.")
     ap.add_argument("--psf_labels_csv", default="", help="Optional labels CSV with source_id,label")
     ap.add_argument("--psf_label_keep", type=int, default=-1, help="0=psf_like, 1=non_psf_like")
     ap.add_argument("--weight_labels_csv", default="", help="Optional labels CSV for sample weighting by source_id.")
     ap.add_argument("--weight_label_target", type=int, default=1, help="Label to upweight in --weight_labels_csv.")
     ap.add_argument("--weight_multiplier", type=float, default=1.0, help="Sample weight multiplier for target label rows.")
     ap.add_argument("--weight_min_confidence", type=float, default=float("nan"), help="Optional confidence threshold for weighted target rows.")
+    ap.add_argument("--quality_flags_csv", default="", help="Optional CSV containing source_id-level quality_flag bitmask.")
+    ap.add_argument("--quality_id_col", type=str, default="source_id", help="ID column in --quality_flags_csv.")
+    ap.add_argument("--quality_flag_col", type=str, default="quality_flag", help="Bitmask column in --quality_flags_csv.")
+    ap.add_argument("--quality_bits_mask", type=int, default=0, help="Drop rows whose quality_flag has any bits in this mask set (e.g. 39 for 1|2|4|32).")
+    ap.add_argument("--quality_drop_unknown_source_id", action="store_true", help="If set, also drop rows with missing source_id when quality filtering is enabled.")
     args = ap.parse_args()
 
     CFG.feature_set = str(args.feature_set)
@@ -654,6 +878,19 @@ def main():
     CFG.early_stopping_rounds = int(args.early_stopping_rounds)
     CFG.learning_rate = float(args.learning_rate)
     CFG.gaia_g_mag_min = None if (not np.isfinite(args.gaia_g_mag_min)) else float(args.gaia_g_mag_min)
+    CFG.border_quantile = None if (not np.isfinite(args.border_quantile)) else float(args.border_quantile)
+    CFG.border_x_col = str(args.border_x_col)
+    CFG.border_y_col = str(args.border_y_col)
+    CFG.max_dist_match = None if (not np.isfinite(args.max_dist_match)) else float(args.max_dist_match)
+    CFG.drop_seam_cuts = bool(args.drop_seam_cuts)
+    CFG.seam_low_threshold = float(args.seam_low_threshold)
+    CFG.seam_line_frac_min = float(args.seam_line_frac_min)
+    CFG.seam_diag_len_min = int(args.seam_diag_len_min)
+    CFG.quality_flags_csv = str(args.quality_flags_csv)
+    CFG.quality_id_col = str(args.quality_id_col)
+    CFG.quality_flag_col = str(args.quality_flag_col)
+    CFG.quality_bits_mask = int(args.quality_bits_mask)
+    CFG.quality_drop_unknown_source_id = bool(args.quality_drop_unknown_source_id)
 
     source_ids_keep = None
     if str(args.psf_labels_csv).strip():
@@ -669,6 +906,18 @@ def main():
             labels_csv=Path(args.weight_labels_csv),
             label_target=int(args.weight_label_target),
             min_confidence=float(args.weight_min_confidence),
+        )
+
+    source_ids_bad_quality = None
+    quality_stats = None
+    if str(args.quality_flags_csv).strip():
+        if int(args.quality_bits_mask) <= 0:
+            raise RuntimeError("--quality_bits_mask must be >0 when --quality_flags_csv is provided.")
+        source_ids_bad_quality, quality_stats = load_bad_quality_source_ids(
+            quality_csv=Path(args.quality_flags_csv),
+            id_col=str(args.quality_id_col),
+            flag_col=str(args.quality_flag_col),
+            bits_mask=int(args.quality_bits_mask),
         )
 
     np.random.seed(CFG.random_seed)
@@ -701,6 +950,12 @@ def main():
     print("stamp_pix:", stamp_pix, "D:", D)
     print("features:", feature_cols)
     print("gaia_g_mag_min:", CFG.gaia_g_mag_min)
+    print("border_quantile:", CFG.border_quantile, "border_cols:", (CFG.border_x_col, CFG.border_y_col))
+    print("max_dist_match:", CFG.max_dist_match)
+    print(
+        "drop_seam_cuts:", CFG.drop_seam_cuts,
+        f"(low<= {CFG.seam_low_threshold}, frac>= {CFG.seam_line_frac_min}, diag_len>={CFG.seam_diag_len_min})"
+    )
     print("use_aug:", CFG.use_aug, "aug_train_only:", CFG.aug_train_only)
     if source_ids_keep is not None:
         print("PSF label filter enabled:", int(args.psf_label_keep), f"(source_ids={len(source_ids_keep)})")
@@ -714,6 +969,20 @@ def main():
             f"confidence={ctext}",
             f"(source_ids={len(source_ids_weighted)})",
         )
+    if source_ids_bad_quality is not None:
+        print(
+            "Quality-bit exclusion enabled:",
+            f"mask={int(args.quality_bits_mask)}",
+            f"bad_source_ids={len(source_ids_bad_quality)}",
+            f"unknown_source_id_policy={'drop' if bool(args.quality_drop_unknown_source_id) else 'keep'}",
+        )
+        if quality_stats is not None:
+            print(
+                "Quality CSV stats:",
+                f"rows_valid={quality_stats['rows_valid']}",
+                f"rows_flagged={quality_stats['rows_flagged']}",
+                f"unique_source_ids_flagged={quality_stats['unique_source_ids_flagged']}",
+            )
     print("OUT_ROOT:", out_root)
     print("PLOTS   :", plot_dir)
 
@@ -729,7 +998,27 @@ def main():
 
     total_train = total_val = total_test = 0
     for field_dir in field_dirs:
-        c = count_rows(field_dir / raw_meta_name, field_dir / VALID_NAME, feature_cols, allow_raw, CFG.gaia_g_mag_min, source_ids_keep=source_ids_keep)
+        raw_meta_path = field_dir / raw_meta_name
+        raw_border_bounds = get_border_bounds(
+            raw_meta_path,
+            x_col=CFG.border_x_col,
+            y_col=CFG.border_y_col,
+            q=float(CFG.border_quantile) if (CFG.border_quantile is not None) else np.nan,
+        )
+        c = count_rows(
+            raw_meta_path,
+            field_dir / VALID_NAME,
+            feature_cols,
+            allow_raw,
+            CFG.gaia_g_mag_min,
+            border_bounds=raw_border_bounds,
+            border_x_col=CFG.border_x_col,
+            border_y_col=CFG.border_y_col,
+            max_dist_match=CFG.max_dist_match,
+            source_ids_keep=source_ids_keep,
+            source_ids_bad_quality=source_ids_bad_quality,
+            quality_drop_unknown_source_id=bool(CFG.quality_drop_unknown_source_id),
+        )
         total_train += c.get(0, 0)
         total_val += c.get(1, 0)
         total_test += c.get(2, 0)
@@ -737,7 +1026,27 @@ def main():
         if CFG.use_aug:
             aug_dir = field_dir / CFG.aug_subdir
             if aug_dir.exists():
-                c2 = count_rows(aug_dir / aug_meta_name, aug_dir / VALID_NAME, feature_cols, allow_aug, CFG.gaia_g_mag_min, source_ids_keep=source_ids_keep)
+                aug_meta_path = aug_dir / aug_meta_name
+                aug_border_bounds = get_border_bounds(
+                    aug_meta_path,
+                    x_col=CFG.border_x_col,
+                    y_col=CFG.border_y_col,
+                    q=float(CFG.border_quantile) if (CFG.border_quantile is not None) else np.nan,
+                )
+                c2 = count_rows(
+                    aug_meta_path,
+                    aug_dir / VALID_NAME,
+                    feature_cols,
+                    allow_aug,
+                    CFG.gaia_g_mag_min,
+                    border_bounds=aug_border_bounds,
+                    border_x_col=CFG.border_x_col,
+                    border_y_col=CFG.border_y_col,
+                    max_dist_match=CFG.max_dist_match,
+                    source_ids_keep=source_ids_keep,
+                    source_ids_bad_quality=source_ids_bad_quality,
+                    quality_drop_unknown_source_id=bool(CFG.quality_drop_unknown_source_id),
+                )
                 total_train += c2.get(0, 0)
                 if not CFG.aug_train_only:
                     total_val += c2.get(1, 0)
@@ -751,6 +1060,11 @@ def main():
     print("train:", n_train, f"(raw+aug={total_train})")
     print("val  :", n_val, f"(raw+aug={total_val})")
     print("test :", n_test, f"(raw+aug={total_test})")
+    if CFG.drop_seam_cuts:
+        print("[NOTE] Seam-cut filtering is applied during NPZ load, so final written counts can be lower than pre-count estimates.")
+    if args.count_only:
+        print("\nCount-only mode enabled; exiting before array write/training.")
+        return
 
     mmaps = open_memmaps(array_dir, n_train, n_val, n_test, n_feat=len(feature_cols), D=D)
     ptrs = {"train": 0, "val": 0, "test": 0}
@@ -818,6 +1132,7 @@ def main():
                 trace_test_writer=trace_writer,
                 source_ids_keep=source_ids_keep,
                 source_ids_weighted=source_ids_weighted,
+                source_ids_bad_quality=source_ids_bad_quality,
                 nonpsf_weight=float(args.weight_multiplier),
             )
 

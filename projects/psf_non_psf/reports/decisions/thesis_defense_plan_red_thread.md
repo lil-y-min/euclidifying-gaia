@@ -28,26 +28,29 @@ The report should not read like a list of methods. It should read like a sequenc
 
 Each chapter should answer one of these questions with evidence.
 
-## Proposed chapter architecture (merged, with subsections)
-1. Framing the Problem: Euclidifying Gaia  
-2. From Measurements to Dataset: Instruments, Domain Gap, and Label Construction  
-3. Modeling Strategy: Baseline Core and Exploratory Extensions  
-4. Results: Predictive Performance, Robustness, and Representation Structure  
-5. Scientific Interpretation and Astrophysical Relevance  
-6. Limitations, Future Program, and Conclusion  
+## Proposed chapter architecture (reconstruction-first, committee-aligned)
+1. Scientific Framing and Positioning  
+2. Measurement Domain Gap and Dataset Construction  
+3. Reconstruction Framework (Core Technical Contribution)  
+4. Morphology-Aware Modeling and Failure Mitigation  
+5. Representation Geometry and Error Topology  
+6. Interpretation: Model Limits vs Gaia Information Ceiling  
+7. Limitations, Future Program, and Conclusion  
 
 ## Chapter/subsection blueprint and minimum evidence
-### 1) Framing the Problem: Euclidifying Gaia
+### 1) Scientific Framing and Positioning
 Suggested subsections:
 - 1.1 Scientific context and motivation (Gaia/Euclid complementarity)
-- 1.2 Thesis question and scope (PSF vs non-PSF core)
-- 1.3 Contributions and expected outcomes
+- 1.2 Related work and gap statement (mandatory)
+- 1.3 Core question and scope definition
+- 1.4 Contributions and expected outcomes
 
 Minimum evidence:
 - One end-to-end workflow figure.
 - One explicit primary research question and 2-3 supporting sub-questions.
+- One precise positioning paragraph: what exists, what is missing, what this thesis adds.
 
-### 2) From Measurements to Dataset: Instruments, Domain Gap, and Label Construction
+### 2) Measurement Domain Gap and Dataset Construction
 Suggested subsections:
 - 2.1 Gaia measurement logic (AF, G PSF-fit, BP/RP prism flux)
 - 2.2 Why mismatch carries morphology information
@@ -59,48 +62,65 @@ Minimum evidence:
 - Compact conceptual diagram for Gaia vs Euclid measurement modes.
 - Data-flow table with sample counts after each selection step.
 - One sensitivity analysis on match radius/ambiguity handling.
+- One cross-match uncertainty estimate (ambiguity rate and/or contamination upper bound).
 
-### 3) Modeling Strategy: Baseline Core and Exploratory Extensions
+### 3) Reconstruction Framework (Core Technical Contribution)
 Suggested subsections:
-- 3.1 Problem setup and target definition (binary PSF/non-PSF now)
-- 3.2 Feature design and preprocessing (Gaia statistics, PCA if used)
-- 3.3 Baseline model (XGBoost) and training protocol
-- 3.4 Score calibration/threshold strategy (if available)
-- 3.5 Exploratory models (UMAP analyses, cVAE extension framing)
+- 3.1 Cross-domain regression setup (Gaia stats -> normalized Euclid morphology representation)
+- 3.2 PCA basis construction and target space definition
+- 3.3 XGBoost regression for PCA coefficients
+- 3.4 Evaluation in physical units (denormalization + chi2 protocol)
+- 3.5 Required ablations (minimum three clean controls)
 
 Minimum evidence:
 - Reproducible train/validation protocol with leakage control statement.
 - Clear primary metric set and model-selection rule.
-- Short rationale for why cVAE is extension, not central claim.
+- Three ablations:
+  - without PCA (or reduced basis),
+  - feature-group reduction,
+  - simpler baseline (linear/shallow tree).
 
-### 4) Results: Predictive Performance, Robustness, and Representation Structure
+### 4) Morphology-Aware Modeling and Failure Mitigation
 Suggested subsections:
-- 4.1 Main predictive results (overall performance)
-- 4.2 Regime robustness (brightness, scan-depth/transits, imbalance)
-- 4.3 Error taxonomy (typical false positives/false negatives)
-- 4.4 Representation diagnostics (UMAP neighborhood behavior)
+- 4.1 PSF vs non-PSF split and weak-label constraints
+- 4.2 Specialist models and MoE setup
+- 4.3 Weighting and trade-off behavior (tail improvement vs central degradation)
+- 4.4 Controlled hypothesis test: does specialization reduce extreme tails?
 
 Minimum evidence:
-- Confusion matrix + PR/F1/ROC summary.
-- Regime-stratified results table.
-- One reproducible representation finding linked to model behavior.
+- Incremental comparison table: baseline -> specialist -> MoE.
+- Tail-focused statistics and central-statistics side-by-side.
+- Explicit statement of gains, regressions, and instability.
 
-### 5) Scientific Interpretation and Astrophysical Relevance
+### 5) Representation Geometry and Error Topology
 Suggested subsections:
-- 5.1 What model decisions correspond to physically
-- 5.2 Case studies (isolated stars, blends, galaxy nuclei, SF knots)
-- 5.3 Where catalog-only inference fails and Euclid context resolves it
-- 5.4 Relevance for future Gaia catalog exploitation
+- 5.1 UMAP structure in Gaia feature space
+- 5.2 Cluster behavior, double-star structure, and neighborhood effects
+- 5.3 Link between representation geometry and reconstruction error tails
+- 5.4 Case studies with pre-registered selection criteria
 
 Minimum evidence:
-- Curated case-study panel with Euclid stamps and Gaia-feature signatures.
-- Explicit interpretation of at least 2 failure modes as astrophysical, not only statistical.
+- One reproducible geometry-to-error linkage.
+- Case-study panel selected with fixed rules (not ad hoc/cherry-picked).
+- Failure taxonomy tied to tail behavior and morphology collapse patterns.
 
-### 6) Limitations, Future Program, and Conclusion
+### 6) Interpretation: Model Limits vs Gaia Information Ceiling
 Suggested subsections:
-- 6.1 Known limitations and mitigation status
-- 6.2 Near-term roadmap (post-thesis continuation)
-- 6.3 Final thesis contribution statement
+- 6.1 What Gaia features demonstrably encode
+- 6.2 Evidence for model underfitting reduction with added capacity
+- 6.3 Residual structure that persists despite capacity increases
+- 6.4 Information-ceiling hypothesis and falsifiable alternatives
+
+Minimum evidence:
+- Capacity ladder evidence (baseline -> richer models) with diminishing/partial gains.
+- Persistent regime-specific residual patterns after model upgrades.
+- Explicit alternative explanations and what future tests would disprove them.
+
+### 7) Limitations, Future Program, and Conclusion
+Suggested subsections:
+- 7.1 Known limitations and mitigation status
+- 7.2 Near-term roadmap (post-thesis continuation)
+- 7.3 Final thesis contribution statement
 
 Minimum evidence:
 - Structured limitations table (issue, impact, mitigation, residual risk).
@@ -127,24 +147,31 @@ Minimum evidence:
 - Report all key metrics by astrophysically meaningful slices, not only global averages.
 - Publish a compact reproducibility package: dataset manifest, config, and script map.
 
+## Mandatory evidence gates before final writing lock
+1. Related-work positioning paragraph that names specific methodological gaps.
+2. Cross-match uncertainty estimate (ambiguity/radius sensitivity/contamination bound).
+3. Three reconstruction ablations with one comparison table.
+4. Pre-registered case-study selection protocol.
+5. Model-limit vs information-ceiling subsection with explicit competing explanations.
+
 ## 3-week execution plan (realistic)
 ### Week 1: Freeze scope + evidence inventory
-- Lock thesis core objective to PSF/non-PSF.
+- Lock thesis core objective to reconstruction-first claim.
 - Freeze dataset version and baseline evaluation protocol.
 - Produce "evidence inventory" table:
   - what result exists,
   - what figure/table supports which chapter,
   - what is missing.
-- Draft Chapters 1-3 (near-final text).
+- Draft Chapters 1-2 (near-final text) and Chapter 3 methods skeleton.
 
 ### Week 2: Final core results + write Methods/Results
-- Run/confirm final baseline and robustness slices.
-- Generate final plots/tables for Chapters 4-5.
-- Draft Chapters 4-5 fully.
-- Prepare one exploratory section (UMAP and/or cVAE) with explicit "extension" framing.
+- Run/confirm baseline + mandatory ablations + morphology-aware comparisons.
+- Generate final plots/tables for Chapters 3-5.
+- Draft Chapters 3-5 fully.
+- Keep cVAE as clearly exploratory evidence only.
 
 ### Week 3: Interpretation, polishing, and defense packaging
-- Write Chapter 6 with strong limitation/future-work clarity and finalize conclusions.
+- Write Chapters 6-7 with strong limitation/future-work clarity and finalize conclusions.
 - Unify notation, captions, and figure references.
 - Build defense-oriented summary:
   - 1-page executive abstract,
@@ -172,7 +199,7 @@ If included, this is a short subsection in evaluation:
 - Keep it lightweight if time is tight; do not let it block thesis completion.
 
 ## Immediate next actions (today)
-1. Confirm final thesis question in one sentence (PSF/non-PSF core).
+1. Confirm final thesis question in one sentence (reconstruction-first core claim).
 2. Create evidence inventory table mapping existing scripts/results to chapters.
 3. Draft Introduction + Data Construction first (fastest stable chapters).
 4. Freeze final experiment list before new exploratory runs.

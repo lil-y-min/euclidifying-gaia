@@ -7,6 +7,7 @@
 - Final weak-labeled set size: `151,593` rows.
 - Label proportions overall: `PSF=66,302 (43.74%)`, `non-PSF=85,291 (56.26%)`.
 
+
 ## 2) How PSF score weights were built (exact)
 - Initial handcrafted score weights:
 - `m_concentration_r2_r6: +1.3`
@@ -23,24 +24,8 @@
 - `m_edge_flux_frac: +0.6360`
 - `m_peak_ratio_2over1: +0.6676`
 
-## 3) Labeling pipeline results
-- Raw feature rows: `273,830`.
-- Labeled after quantile + Gaia rule + confidence filter: `151,593`.
-- Removed by confidence filter: `22,976`.
-- No dedup loss (`removed_by_dedup=0`).
-- Gaia non-PSF override count: `36,587`.
-- Clarification on `confidence filter` (exact definition from `scripts/nn/00_psf_labeling.py`):
-- Confidence is a normalized distance from the score midpoint, not a calibrated probability.
-- `mid = (hi + lo) / 2`
-- `confidence = clip( abs(score_psf_like - mid) / abs(hi - lo), 0, 1 )`
-- Filter used: keep only `confidence >= 0.55`.
-- Interpretation: rows close to the ambiguous middle are dropped; high-tail rows are kept.
-- Split balance (post-labeling):
-- Train: `113,004` (`PSF 43.20%`, `non-PSF 56.80%`)
-- Val: `20,065` (`PSF 44.74%`, `non-PSF 55.26%`)
-- Test: `18,524` (`PSF 45.90%`, `non-PSF 54.10%`)
 
-## 4) Gate model experiments and decision
+## 3) Gate model experiments and decision
 - Models compared on gate task: logistic / RF / XGB.
 - Best test AUC: logistic (`0.965152`).
 - Best test logloss: XGB (`0.134655`) in stability pass comparison.
@@ -52,13 +37,31 @@
 - Coefs in feature order `[conc, asym, ell, peak_sep, edge_flux, peak_ratio]`:
 - `[-1.8360597216, 0.6278905796, 1.2190703543, 1.1578589931, 0.6175777985, 0.5366239584]`
 
+
+## 4) Labeling pipeline results
+- Raw feature rows: `273,830`.
+- Labeled after quantile + Gaia rule + confidence filter: `151,593`.
+- Removed by confidence filter: `22,976`.
+- No dedup loss (`removed_by_dedup=0`).
+- Gaia non-PSF override count: `36,587`.:
+- Confidence is a normalized distance from the score midpoint, not a calibrated probability.
+- `mid = (hi + lo) / 2`
+- `confidence = clip( abs(score_psf_like - mid) / abs(hi - lo), 0, 1 )`
+- Filter used: keep only `confidence >= 0.55`.
+- Interpretation: rows close to the ambiguous middle are dropped; high-tail rows are kept.
+- Split balance (post-labeling):
+- Train: `113,004` (`PSF 43.20%`, `non-PSF 56.80%`)
+- Val: `20,065` (`PSF 44.74%`, `non-PSF 55.26%`)
+- Test: `18,524` (`PSF 45.90%`, `non-PSF 54.10%`)
+
+
 ## 5) XGB vs NN reconstruction test
 - Decision on 2026-02-17: keep XGBoost as primary recon model.
 - XGB won most shape/flux/chi2 metrics; NN only won `chi2nu_p90` in that comparison.
 
+
 ## 6) PSF/non-PSF specialist experiments
-- Clarification on `smoke` specialist runs:
-- `Smoke` means a small-scale pipeline sanity test before full-cost training.
+- First `smoke` specialist runs:
 - In this project smoke caps were: `train=8000`, `val=2000`, `test=2000`, with shortened boosting schedule.
 - Smoke is used to validate filtering/training/evaluation plumbing; it is not used as final production ranking.
 - Smoke split runs validated pipeline behavior:
@@ -67,6 +70,7 @@
 - Full specialists vs baseline by slice:
 - On PSF-like slice, specialist improved strongly over baseline (`chi2 median 33.63 vs 44.45`).
 - On non-PSF-like slice, specialist improved tails (`p90 3526.77 vs 4630.22`, `p99 14863.47 vs 23590.13`) but median got slightly worse (`49.08 vs 44.36`).
+
 
 ## 7) Softmix MoE ("soft mx MoE")
 - Contract routing rule used:
@@ -83,7 +87,7 @@
 - True non-PSF: `73.03%` routed non-PSF-only.
 
 ## 8) Explicit comparison: 2-expert MoE vs base (no-MoE)
-- We use these explicit formulas (lower metric is better):
+- We use these formulas (lower metric is better):
 - `tail_improvement_pct = 100 * (1 - candidate_tail / base_tail)`
 - `median_change_pct = 100 * (candidate_median / base_median - 1)`
 - `shape_rmse_change_pct = 100 * (candidate_rmse / base_rmse - 1)`

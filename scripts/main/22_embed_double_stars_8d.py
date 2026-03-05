@@ -154,6 +154,37 @@ def choose_backend(method: str) -> str:
         raise RuntimeError(f"UMAP failed to initialize: {e}") from e
 
 
+def load_bad_quality_source_ids(
+    quality_csv: Path,
+    id_col: str,
+    flag_col: str,
+    bits_mask: int,
+) -> np.ndarray:
+    df = pd.read_csv(quality_csv, usecols=[id_col, flag_col], low_memory=False)
+    df[id_col] = pd.to_numeric(df[id_col], errors="coerce")
+    df[flag_col] = pd.to_numeric(df[flag_col], errors="coerce")
+    df = df.dropna(subset=[id_col, flag_col]).copy()
+    if len(df) == 0:
+        return np.array([], dtype=np.int64)
+    sid = df[id_col].to_numpy(dtype=np.int64)
+    qf = df[flag_col].to_numpy(dtype=np.int64)
+    bad = (qf & int(bits_mask)) != 0
+    return np.unique(sid[bad]).astype(np.int64)
+
+
+def load_psf_source_ids(labels_csv: Path, label_keep: int) -> np.ndarray:
+    df = pd.read_csv(labels_csv, usecols=["source_id", "label"], low_memory=False)
+    df["source_id"] = pd.to_numeric(df["source_id"], errors="coerce")
+    df["label"] = pd.to_numeric(df["label"], errors="coerce")
+    df = df.dropna(subset=["source_id", "label"]).copy()
+    df["source_id"] = df["source_id"].astype(np.int64)
+    df["label"] = df["label"].astype(np.int64)
+    keep = df.loc[df["label"] == int(label_keep), "source_id"].drop_duplicates().to_numpy(dtype=np.int64)
+    if keep.size == 0:
+        raise RuntimeError(f"No source_id found in {labels_csv} for label={label_keep}")
+    return keep
+
+
 def build_embedding(X: np.ndarray, backend: str, seed: int, n_neighbors: int, min_dist: float) -> np.ndarray:
     if backend != "umap":
         raise ValueError("Only UMAP backend is supported.")
@@ -738,10 +769,16 @@ def main() -> None:
     ap.add_argument("--stability_seeds", default="", help="Comma-separated extra UMAP seeds for stability checks, e.g. '7,42,123'")
     ap.add_argument("--stability_k", type=int, default=50, help="k for kNN-overlap stability metric")
     ap.add_argument("--stability_sample_n", type=int, default=15000, help="Max sample size for stability kNN-overlap")
+    ap.add_argument("--quality_flags_csv", default="", help="Optional quality flag CSV for source-level exclusion.")
+    ap.add_argument("--quality_id_col", default="source_id")
+    ap.add_argument("--quality_flag_col", default="quality_flag")
+    ap.add_argument("--quality_bits_mask", type=int, default=0, help="Exclude rows with (quality_flag & mask) != 0.")
+    ap.add_argument("--psf_labels_csv", default="", help="Optional labels CSV with source_id,label to keep only one class.")
+    ap.add_argument("--psf_label_keep", type=int, default=-1, help="0=psf_like, 1=non_psf_like")
     args = ap.parse_args()
     args.stability_seeds_parsed = parse_seed_list(args.stability_seeds)
 
-    base = Path(__file__).resolve().parents[1]
+    base = Path(__file__).resolve().parents[2]
     dataset_root = base / "output" / "dataset_npz"
     wds_dir = Path(args.wds_dir) if args.wds_dir else (base / "output" / "crossmatch" / "wds" / "wds_xmatch")
     args.wds_dir_resolved = wds_dir
@@ -762,6 +799,24 @@ def main() -> None:
 
     print("Loading metadata...")
     m = load_metadata(dataset_root, feature_cols, metadata_name=str(args.metadata_name))
+    if str(args.psf_labels_csv).strip():
+        if int(args.psf_label_keep) not in (0, 1):
+            raise RuntimeError("--psf_label_keep must be 0 or 1 when --psf_labels_csv is provided.")
+        keep_ids = load_psf_source_ids(Path(str(args.psf_labels_csv)), int(args.psf_label_keep))
+        m = m.loc[m["source_id"].isin(keep_ids)].copy()
+        print(f"PSF label filter applied: keep_label={int(args.psf_label_keep)} kept={len(m):,} rows after merge.")
+    if str(args.quality_flags_csv).strip():
+        if int(args.quality_bits_mask) <= 0:
+            raise RuntimeError("--quality_bits_mask must be >0 when --quality_flags_csv is provided.")
+        bad_ids = load_bad_quality_source_ids(
+            quality_csv=Path(str(args.quality_flags_csv)),
+            id_col=str(args.quality_id_col),
+            flag_col=str(args.quality_flag_col),
+            bits_mask=int(args.quality_bits_mask),
+        )
+        if bad_ids.size > 0:
+            m = m.loc[~m["source_id"].isin(bad_ids)].copy()
+        print(f"Quality filter applied: mask={int(args.quality_bits_mask)} removed={int(bad_ids.size)} sources (from quality CSV).")
     print(f"  metadata unique sources: {len(m):,}")
 
     print("Loading WDS labels...")

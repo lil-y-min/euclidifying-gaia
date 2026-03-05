@@ -1,0 +1,25 @@
+{
+  "latex-workshop.latex.tools": [
+    {
+      "name": "pdflatex-full",
+      "command": "/data/yn316/texlive/2025/bin/x86_64-linux/pdflatex",
+      "args": [
+        "-interaction=nonstopmode",
+        "-halt-on-error",
+        "-synctex=1",
+        "%DOC%"
+      ]
+    }
+  ],
+  "latex-workshop.latex.recipes": [
+    {
+      "name": "pdflatex-full x2",
+      "tools": [
+        "pdflatex-full",
+        "pdflatex-full"
+      ]
+    }
+  ],
+  "latex-workshop.latex.recipe.default": "pdflatex-full x2",
+  "latex-workshop.view.pdf.viewer": "external"
+}

@@ -105,6 +105,37 @@ MORPH_PLOT06_LABELS = {
 }
 
 
+def load_bad_quality_source_ids(
+    quality_csv: Path,
+    id_col: str,
+    flag_col: str,
+    bits_mask: int,
+) -> np.ndarray:
+    df = pd.read_csv(quality_csv, usecols=[id_col, flag_col], low_memory=False)
+    df[id_col] = pd.to_numeric(df[id_col], errors="coerce")
+    df[flag_col] = pd.to_numeric(df[flag_col], errors="coerce")
+    df = df.dropna(subset=[id_col, flag_col]).copy()
+    if len(df) == 0:
+        return np.array([], dtype=np.int64)
+    sid = df[id_col].to_numpy(dtype=np.int64)
+    qf = df[flag_col].to_numpy(dtype=np.int64)
+    bad = (qf & int(bits_mask)) != 0
+    return np.unique(sid[bad]).astype(np.int64)
+
+
+def load_psf_source_ids(labels_csv: Path, label_keep: int) -> np.ndarray:
+    df = pd.read_csv(labels_csv, usecols=["source_id", "label"], low_memory=False)
+    df["source_id"] = pd.to_numeric(df["source_id"], errors="coerce")
+    df["label"] = pd.to_numeric(df["label"], errors="coerce")
+    df = df.dropna(subset=["source_id", "label"]).copy()
+    df["source_id"] = df["source_id"].astype(np.int64)
+    df["label"] = df["label"].astype(np.int64)
+    keep = df.loc[df["label"] == int(label_keep), "source_id"].drop_duplicates().to_numpy(dtype=np.int64)
+    if keep.size == 0:
+        raise RuntimeError(f"No source_id found in {labels_csv} for label={label_keep}")
+    return keep
+
+
 def ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -411,6 +442,7 @@ def build_pixel_matrix(
     dataset_root: Path,
     normalize: str,
     eps: float,
+    crop_center: int = 0,
 ) -> Tuple[pd.DataFrame, np.ndarray]:
     out_rows: List[pd.DataFrame] = []
     chunks: List[np.ndarray] = []
@@ -442,6 +474,15 @@ def build_pixel_matrix(
             stamps = Xall[idx2].astype(np.float32, copy=False)
             if stamps.ndim != 3:
                 continue
+
+            # Crop to central N×N before normalization (background diagnostic).
+            if crop_center > 0:
+                _, H, W = stamps.shape
+                if crop_center < H and crop_center < W:
+                    h0 = (H - crop_center) // 2
+                    w0 = (W - crop_center) // 2
+                    stamps = stamps[:, h0:h0 + crop_center, w0:w0 + crop_center]
+
             stamps_n, ok_norm = normalize_stamps(stamps, mode=normalize, eps=eps)
             if not np.any(ok_norm):
                 continue
@@ -493,25 +534,64 @@ def load_wds_labels(wds_dir: Path, threshold_arcsec: float, threshold_mode: str 
     return w[["source_id", "is_double", "wds_dist_arcsec", "wds_lstsep", "wds_comp", "wds_disc"]]
 
 
-def scale_features(X: np.ndarray, mode: str) -> np.ndarray:
+def scale_features(
+    X: np.ndarray,
+    mode: str,
+    sigma_floor_quantile: float = 20.0,
+    small_sigma_policy: str = "zero",
+) -> np.ndarray:
     mode = mode.lower().strip()
     if mode == "standard":
         return StandardScaler().fit_transform(X)
+    if mode == "standard_sigma_floor":
+        q = float(sigma_floor_quantile)
+        if not (0.0 <= q < 100.0):
+            raise ValueError("sigma_floor_quantile must be in [0, 100)")
+        policy = str(small_sigma_policy).lower().strip()
+        if policy not in {"zero", "floor"}:
+            raise ValueError("small_sigma_policy must be one of: zero, floor")
+
+        mu = np.mean(X, axis=0, dtype=np.float64)
+        sigma = np.std(X, axis=0, dtype=np.float64)
+        pos_sigma = sigma[np.isfinite(sigma) & (sigma > 0.0)]
+        sigma_floor = float(np.percentile(pos_sigma, q)) if pos_sigma.size else 0.0
+        small = (~np.isfinite(sigma)) | (sigma <= sigma_floor)
+
+        Xc = X.astype(np.float32, copy=False) - mu.astype(np.float32, copy=False)
+        out = np.zeros_like(Xc, dtype=np.float32)
+        if policy == "zero":
+            good = ~small
+            if np.any(good):
+                out[:, good] = Xc[:, good] / sigma[good].astype(np.float32, copy=False)
+        else:
+            denom = sigma.copy()
+            denom[~np.isfinite(denom)] = 0.0
+            denom = np.maximum(denom, sigma_floor)
+            denom[denom <= 0.0] = 1.0
+            out = Xc / denom.astype(np.float32, copy=False)
+
+        print(
+            "[SCALE] standard_sigma_floor:"
+            f" q={q:.1f} floor={sigma_floor:.3e}"
+            f" small_dims={int(np.sum(small))}/{int(X.shape[1])}"
+            f" policy={policy}"
+        )
+        return out
     if mode == "minmax":
         return MinMaxScaler(feature_range=(0.0, 1.0)).fit_transform(X)
     if mode == "none":
         return X
-    raise ValueError("scale mode must be one of: standard, minmax, none")
+    raise ValueError("scale mode must be one of: standard, standard_sigma_floor, minmax, none")
 
 
-def build_embedding(X: np.ndarray, seed: int, n_neighbors: int, min_dist: float) -> np.ndarray:
+def build_embedding(X: np.ndarray, seed: int, n_neighbors: int, min_dist: float, metric: str = "euclidean") -> np.ndarray:
     import umap
 
     reducer = umap.UMAP(
         n_components=2,
         n_neighbors=n_neighbors,
         min_dist=min_dist,
-        metric="euclidean",
+        metric=metric,
         random_state=seed,
         init="spectral",
     )
@@ -702,10 +782,23 @@ def main() -> None:
     ap.add_argument("--metadata_name", default="metadata.csv", help="Per-field metadata filename to read (e.g. metadata_16d.csv)")
     ap.add_argument("--out_tag", default="", help="Optional subfolder tag to isolate outputs (e.g. 16d_phase3)")
     ap.add_argument("--max_points", type=int, default=120000)
+    ap.add_argument("--force_include_doubles", action="store_true", help="When sampling, always include all WDS doubles then fill with non-doubles.")
     ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--n_neighbors", type=int, default=30)
     ap.add_argument("--min_dist", type=float, default=0.08)
-    ap.add_argument("--scaling", default="standard", choices=["standard", "minmax", "none"])
+    ap.add_argument("--scaling", default="standard", choices=["standard", "standard_sigma_floor", "minmax", "none"])
+    ap.add_argument(
+        "--sigma_floor_quantile",
+        type=float,
+        default=20.0,
+        help="For scaling=standard_sigma_floor: percentile of per-dim sigma used as floor (e.g. 10 or 20).",
+    )
+    ap.add_argument(
+        "--small_sigma_policy",
+        default="zero",
+        choices=["zero", "floor"],
+        help="For scaling=standard_sigma_floor: zero small-sigma dims, or divide by floored sigma.",
+    )
     ap.add_argument("--normalize", default="integral_pos", choices=["integral_pos", "integral", "l2"])
     ap.add_argument("--eps", type=float, default=1e-12)
     ap.add_argument("--g_mag_min", type=float, default=None)
@@ -717,10 +810,18 @@ def main() -> None:
     ap.add_argument("--stability_seeds", default="", help="Comma-separated extra UMAP seeds for stability checks, e.g. '7,42,123'")
     ap.add_argument("--stability_k", type=int, default=50, help="k for kNN-overlap stability metric")
     ap.add_argument("--stability_sample_n", type=int, default=15000, help="Max sample size for stability kNN-overlap")
+    ap.add_argument("--quality_flags_csv", default="", help="Optional quality flag CSV for source-level exclusion.")
+    ap.add_argument("--quality_id_col", default="source_id")
+    ap.add_argument("--quality_flag_col", default="quality_flag")
+    ap.add_argument("--quality_bits_mask", type=int, default=0, help="Exclude rows with (quality_flag & mask) != 0.")
+    ap.add_argument("--psf_labels_csv", default="", help="Optional labels CSV with source_id,label to keep only one class.")
+    ap.add_argument("--psf_label_keep", type=int, default=-1, help="0=psf_like, 1=non_psf_like")
+    ap.add_argument("--crop_center", type=int, default=0, help="If >0, crop each stamp to central N×N pixels before normalization (e.g. 10 for 10x10). 0=no crop.")
+    ap.add_argument("--umap_metric", default="euclidean", help="UMAP distance metric (e.g. euclidean, cosine). Default: euclidean.")
     args = ap.parse_args()
     args.stability_seeds_parsed = parse_seed_list(args.stability_seeds)
 
-    base = Path(__file__).resolve().parents[1]
+    base = Path(__file__).resolve().parents[2]
     dataset_root = Path(args.dataset_root)
     wds_dir = Path(args.wds_dir)
 
@@ -752,17 +853,52 @@ def main() -> None:
         g_mag_max=args.g_mag_max,
         metadata_name=str(args.metadata_name),
     )
-    if len(cand) > int(args.max_points):
-        cand = cand.sample(n=int(args.max_points), random_state=args.seed).reset_index(drop=True)
-        print(f"[SAMPLE] sampled to {len(cand):,} rows")
-
-    rows, X = build_pixel_matrix(cand, dataset_root=dataset_root, normalize=args.normalize, eps=args.eps)
+    if str(args.psf_labels_csv).strip():
+        if int(args.psf_label_keep) not in (0, 1):
+            raise RuntimeError("--psf_label_keep must be 0 or 1 when --psf_labels_csv is provided.")
+        keep_ids = load_psf_source_ids(Path(str(args.psf_labels_csv)), int(args.psf_label_keep))
+        cand = cand.loc[cand["source_id"].isin(keep_ids)].copy()
+        print(f"PSF label filter applied: keep_label={int(args.psf_label_keep)} kept={len(cand):,} rows after merge.")
+    if str(args.quality_flags_csv).strip():
+        if int(args.quality_bits_mask) <= 0:
+            raise RuntimeError("--quality_bits_mask must be >0 when --quality_flags_csv is provided.")
+        bad_ids = load_bad_quality_source_ids(
+            quality_csv=Path(str(args.quality_flags_csv)),
+            id_col=str(args.quality_id_col),
+            flag_col=str(args.quality_flag_col),
+            bits_mask=int(args.quality_bits_mask),
+        )
+        if bad_ids.size > 0:
+            cand = cand.loc[~cand["source_id"].isin(bad_ids)].copy()
+        print(f"Quality filter applied: mask={int(args.quality_bits_mask)} removed={int(bad_ids.size)} sources (from quality CSV).")
     w = load_wds_labels(wds_dir, threshold_arcsec=float(args.double_threshold_arcsec), threshold_mode=str(args.double_condition))
+    if len(cand) > int(args.max_points):
+        if bool(args.force_include_doubles):
+            c2 = cand.merge(w[["source_id", "is_double"]], on="source_id", how="left")
+            c2["is_double"] = c2["is_double"].fillna(False).astype(bool)
+            idx_double = np.where(c2["is_double"].to_numpy(dtype=bool))[0]
+            idx_non = np.where(~c2["is_double"].to_numpy(dtype=bool))[0]
+            n_keep_non = max(0, min(len(idx_non), int(args.max_points) - len(idx_double)))
+            rng = np.random.default_rng(int(args.seed))
+            keep_non = rng.choice(idx_non, size=n_keep_non, replace=False) if n_keep_non < len(idx_non) else idx_non
+            keep = np.unique(np.concatenate([idx_double, keep_non]))
+            cand = c2.iloc[keep].drop(columns=["is_double"]).reset_index(drop=True)
+            print(f"[SAMPLE] forced doubles: sampled to {len(cand):,} rows (doubles_kept={len(idx_double):,})")
+        else:
+            cand = cand.sample(n=int(args.max_points), random_state=args.seed).reset_index(drop=True)
+            print(f"[SAMPLE] sampled to {len(cand):,} rows")
+
+    rows, X = build_pixel_matrix(cand, dataset_root=dataset_root, normalize=args.normalize, eps=args.eps, crop_center=int(args.crop_center))
 
     dfe = rows.merge(w, on="source_id", how="left")
     dfe["is_double"] = dfe["is_double"].fillna(False).astype(bool)
 
-    Xs = scale_features(X, mode=args.scaling).astype(np.float32, copy=False)
+    Xs = scale_features(
+        X,
+        mode=args.scaling,
+        sigma_floor_quantile=float(args.sigma_floor_quantile),
+        small_sigma_policy=str(args.small_sigma_policy),
+    ).astype(np.float32, copy=False)
     if bool(args.shuffle_before_umap):
         rng_shuffle = np.random.default_rng(int(args.shuffle_seed))
         perm = rng_shuffle.permutation(len(dfe))
@@ -771,7 +907,7 @@ def main() -> None:
         print(f"[SHUFFLE] permuted rows before UMAP using shuffle_seed={args.shuffle_seed}")
     print(f"Fitting UMAP on {len(dfe):,} rows and {Xs.shape[1]} pixel dims...")
     t0 = time.time()
-    emb = build_embedding(Xs, seed=int(args.seed), n_neighbors=int(args.n_neighbors), min_dist=float(args.min_dist))
+    emb = build_embedding(Xs, seed=int(args.seed), n_neighbors=int(args.n_neighbors), min_dist=float(args.min_dist), metric=str(args.umap_metric))
     print(f"UMAP done in {fmt_duration(time.time() - t0)}")
 
     dfe["x"] = emb[:, 0]
@@ -847,12 +983,16 @@ def main() -> None:
         "n_double_selected": int(dfe["is_double"].sum()),
         "frac_double": float(dfe["is_double"].mean()) if len(dfe) else 0.0,
         "pixel_dim": int(X.shape[1]),
+        "crop_center": int(args.crop_center),
         "normalize": args.normalize,
         "scaling": args.scaling,
+        "sigma_floor_quantile": float(args.sigma_floor_quantile),
+        "small_sigma_policy": str(args.small_sigma_policy),
         "g_mag_min": args.g_mag_min,
         "g_mag_max": args.g_mag_max,
         "umap_n_neighbors": int(args.n_neighbors),
         "umap_min_dist": float(args.min_dist),
+        "umap_metric": str(args.umap_metric),
         "double_threshold_arcsec": float(args.double_threshold_arcsec),
         "double_condition": str(args.double_condition),
         "morphology_feature_cols": MORPH_FEATURE_COLS,

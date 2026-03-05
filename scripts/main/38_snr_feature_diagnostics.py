@@ -36,6 +36,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import xgboost as xgb
 
+MORPH_COLS: List[str] = [
+    "m_concentration_r2_r6",
+    "m_asymmetry_180",
+    "m_ellipticity",
+    "m_peak_sep_pix",
+    "m_edge_flux_frac",
+    "m_peak_ratio_2over1",
+]
+
 
 @dataclass
 class Config:
@@ -92,6 +101,7 @@ def load_manifest(run_root: Path) -> Dict:
         "pca_npz",
         "scaler_npz",
         "plots_dir",
+        "trace_test_csv",
     ]
     for k in str_keys:
         if k in out:
@@ -411,6 +421,60 @@ def plot_snr_vs_features(
         savefig(out_dir / "00_snr_vs_feature_spearman_bar.png")
 
 
+def plot_anchor_vs_features(
+    out_dir: Path,
+    anchor: np.ndarray,
+    anchor_name: str,
+    feat_mat: np.ndarray,
+    feat_names: List[str],
+    csv_name: str,
+    bar_png_name: str,
+    hex_prefix: str,
+    max_points_plot: int,
+    seed: int,
+) -> None:
+    n = int(anchor.shape[0])
+    idx = choose_sample_idx(n, max_points_plot, seed)
+    a = np.asarray(anchor[idx], dtype=np.float32)
+    f = np.asarray(feat_mat[idx], dtype=np.float32)
+
+    rows = []
+    for j, feat in enumerate(feat_names):
+        y = f[:, j]
+        good = np.isfinite(a) & np.isfinite(y)
+        ng = int(np.sum(good))
+        if ng < 50:
+            rows.append({"feature": feat, "spearman": np.nan, "n": ng})
+            continue
+
+        c = spearman_corr(a[good], y[good])
+        rows.append({"feature": feat, "spearman": c, "n": ng})
+
+        plt.figure(figsize=(6.5, 5.2))
+        plt.hexbin(a[good], y[good], gridsize=75, bins="log", mincnt=1, cmap="viridis")
+        cb = plt.colorbar()
+        cb.set_label("log10(count)")
+        plt.xlabel(anchor_name)
+        plt.ylabel(feat)
+        plt.title(f"{anchor_name} vs {feat} | Spearman={c:.3f}")
+        savefig(out_dir / f"{hex_prefix}_{j + 1:02d}_{feat}.png")
+
+    df = pd.DataFrame(rows)
+    df.to_csv(out_dir / csv_name, index=False)
+
+    d = df.dropna(subset=["spearman"]).copy()
+    if d.empty:
+        return
+    order_map = {name: i for i, name in enumerate(feat_names)}
+    d["__ord"] = d["feature"].map(order_map)
+    d = d.sort_values("__ord", ascending=True).drop(columns=["__ord"])
+    plt.figure(figsize=(8.8, max(4.8, 0.45 * len(d))))
+    plt.barh(d["feature"], np.abs(d["spearman"].to_numpy(dtype=float)))
+    plt.xlabel(f"|Spearman({anchor_name}, feature)|")
+    plt.title(f"Correlation strength vs {anchor_name}")
+    savefig(out_dir / bar_png_name)
+
+
 def plot_metric_vs_snr_bins(
     out_dir: Path,
     snr: np.ndarray,
@@ -563,6 +627,58 @@ def snr_permutation_test(
     pd.DataFrame(rows).to_csv(out_dir / "11_snr_permutation_importance.csv", index=False)
 
 
+def load_morph_joined_test_table(
+    *,
+    base_dir: Path,
+    run_root: Path,
+    run_name: str,
+    manifest: Dict,
+    n_test: int,
+    morph_csv_raw: str,
+) -> pd.DataFrame:
+    trace_raw = str(manifest.get("trace_test_csv", str(run_root / "trace" / "trace_test.csv")))
+    trace_path = resolve_manifest_path(
+        trace_raw,
+        base_dir=base_dir,
+        run_root=run_root,
+        run_name=run_name,
+        must_exist=True,
+    )
+    morph_path = resolve_manifest_path(
+        morph_csv_raw,
+        base_dir=base_dir,
+        run_root=run_root,
+        run_name=run_name,
+        must_exist=True,
+    )
+
+    tr = pd.read_csv(trace_path, usecols=["test_index", "source_id"])
+    tr["test_index"] = pd.to_numeric(tr["test_index"], errors="coerce")
+    tr["source_id"] = pd.to_numeric(tr["source_id"], errors="coerce")
+    tr = tr.dropna(subset=["test_index", "source_id"]).copy()
+    tr["test_index"] = tr["test_index"].astype(np.int64)
+    tr["source_id"] = tr["source_id"].astype(np.int64)
+    tr = tr[(tr["test_index"] >= 0) & (tr["test_index"] < int(n_test))].copy()
+    tr = tr.drop_duplicates(subset=["test_index"], keep="first")
+
+    m = pd.read_csv(morph_path, low_memory=False)
+    keep_cols = ["source_id"] + [c for c in MORPH_COLS if c in m.columns]
+    if len(keep_cols) <= 1:
+        raise RuntimeError(f"No morphology columns found in morph CSV: {morph_path}")
+    m = m[keep_cols].copy()
+    m["source_id"] = pd.to_numeric(m["source_id"], errors="coerce")
+    for c in keep_cols[1:]:
+        m[c] = pd.to_numeric(m[c], errors="coerce")
+    m = m.dropna(subset=["source_id"]).copy()
+    m["source_id"] = m["source_id"].astype(np.int64)
+    m = m.drop_duplicates(subset=["source_id"], keep="first")
+
+    j = tr.merge(m, on="source_id", how="inner")
+    if j.empty:
+        raise RuntimeError("No overlapping source_id between trace_test.csv and morph CSV")
+    return j
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="SNR-centric Gaia feature diagnostics")
     ap.add_argument("--run", required=True, help="Run name under output/ml_runs/")
@@ -572,6 +688,12 @@ def main() -> None:
     ap.add_argument("--perm_repeats", type=int, default=3)
     ap.add_argument("--perm_sample_size", type=int, default=20000)
     ap.add_argument("--seed", type=int, default=123)
+    ap.add_argument(
+        "--morph_csv",
+        default="",
+        help="Optional morphology CSV with source_id + m_* columns. "
+        "Default: output/ml_runs/nn_psf_labels/labels_psf_weak.csv (if present).",
+    )
     args = ap.parse_args()
 
     cfg = Config(
@@ -684,6 +806,63 @@ def main() -> None:
         )
     else:
         print("[WARN] Could not detect supported metric mode for this run; generated only SNR-vs-feature plots.")
+
+    morph_csv = str(args.morph_csv).strip()
+    if not morph_csv:
+        default_morph = cfg.base_dir / "output" / "ml_runs" / "nn_psf_labels" / "labels_psf_weak.csv"
+        if default_morph.exists():
+            morph_csv = str(default_morph)
+
+    if morph_csv:
+        try:
+            mj = load_morph_joined_test_table(
+                base_dir=cfg.base_dir,
+                run_root=run_root,
+                run_name=cfg.run_name,
+                manifest=manifest,
+                n_test=n_test,
+                morph_csv_raw=morph_csv,
+            )
+            morph_cols_present = [c for c in MORPH_COLS if c in mj.columns]
+            ti = mj["test_index"].to_numpy(dtype=np.int64)
+            if metric is not None:
+                snr_src = snr_full_raw
+            else:
+                snr_src = np.asarray(X_test[:, snr_idx], dtype=np.float32)
+
+            snr_m = np.asarray(snr_src[ti], dtype=np.float32)
+            fm = mj[morph_cols_present].to_numpy(dtype=np.float32)
+
+            plot_anchor_vs_features(
+                out_dir=out_dir,
+                anchor=snr_m,
+                anchor_name="feat_log10_snr",
+                feat_mat=fm,
+                feat_names=morph_cols_present,
+                csv_name="20_snr_vs_morph_spearman.csv",
+                bar_png_name="20_snr_vs_morph_spearman_bar.png",
+                hex_prefix="21_snr_vs_morph",
+                max_points_plot=cfg.max_points_plot,
+                seed=cfg.seed,
+            )
+
+            if metric is not None:
+                met_m = np.asarray(metric[ti], dtype=np.float32)
+                met_name = "rmse_pix" if mode == "reconstruct_rmse" else "abs_error_log10_flux"
+                plot_anchor_vs_features(
+                    out_dir=out_dir,
+                    anchor=met_m,
+                    anchor_name=met_name,
+                    feat_mat=fm,
+                    feat_names=morph_cols_present,
+                    csv_name="22_metric_vs_morph_spearman.csv",
+                    bar_png_name="22_metric_vs_morph_spearman_bar.png",
+                    hex_prefix="23_metric_vs_morph",
+                    max_points_plot=cfg.max_points_plot,
+                    seed=cfg.seed + 11,
+                )
+        except Exception as exc:
+            print(f"[WARN] Morphology diagnostics skipped: {exc}")
 
     print("DONE")
     print("Output:", out_dir)
