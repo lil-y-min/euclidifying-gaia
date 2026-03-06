@@ -89,10 +89,10 @@ WISE_MIN_SNR = 3.0
 
 # Quasar locus selection box in Vega magnitudes (from Fig. 5 visual inspection)
 # W1 - W2 vs W2 - W3; adjust these to refine purity/completeness trade-off.
-WISE_W12_LO =  0.3   # W1 - W2 lower bound
-WISE_W12_HI =  2.0   # W1 - W2 upper bound
-WISE_W23_LO =  1.0   # W2 - W3 lower bound
-WISE_W23_HI =  4.5   # W2 - W3 upper bound
+WISE_W12_LO =  0.6   # W1 - W2 lower bound (Vega)
+WISE_W12_HI =  1.6   # W1 - W2 upper bound (Vega)
+WISE_W23_LO =  2.0   # W2 - W3 lower bound (Vega)
+WISE_W23_HI =  4.2   # W2 - W3 upper bound (Vega)
 
 # XGB
 NUM_BOOST_ROUND = 1000
@@ -379,52 +379,236 @@ def main() -> None:
         fi_df.to_csv(OUT_DIR / "feature_importance.csv", index=False)
 
         # ---- Plots ----
+        import warnings
 
-        # Fig. 5 style: W1-W2 vs W2-W3 with quasar locus box
-        df_plot = df[["w1_w2", "w2_w3", "label"]].dropna()
+        label_arr  = df["label"].to_numpy(dtype=int)
+        # Colours used throughout: quasar=orange, non-quasar=steelblue
+        C_QSO  = "#e8671b"
+        C_NON  = "#4b8ec4"
+        C_GREY = "#aaaaaa"
+
+        # ------------------------------------------------------------------
+        # 01  WISE colour-colour diagram (Fig. 5 style)
+        # ------------------------------------------------------------------
+        df_cc = df[["w1_w2", "w2_w3", "label"]].dropna()
         fig, ax = plt.subplots(figsize=(7, 6))
-        outside = df_plot["label"] == 0
-        inside  = df_plot["label"] == 1
-        ax.scatter(df_plot.loc[outside, "w2_w3"], df_plot.loc[outside, "w1_w2"],
-                   s=3, alpha=0.2, color="gray", label="Outside locus")
-        ax.scatter(df_plot.loc[inside, "w2_w3"], df_plot.loc[inside, "w1_w2"],
-                   s=8, alpha=0.6, color="tab:orange", label="Quasar locus")
-        # Draw selection box
+        mask_out = df_cc["label"] == 0
+        mask_in  = df_cc["label"] == 1
+        ax.scatter(df_cc.loc[mask_out, "w2_w3"], df_cc.loc[mask_out, "w1_w2"],
+                   s=4, alpha=0.25, color=C_GREY, label=f"Outside locus  (n={mask_out.sum()})")
+        ax.scatter(df_cc.loc[mask_in,  "w2_w3"], df_cc.loc[mask_in,  "w1_w2"],
+                   s=10, alpha=0.7, color=C_QSO,  label=f"Quasar locus   (n={mask_in.sum()})")
         rect_x = [WISE_W23_LO, WISE_W23_HI, WISE_W23_HI, WISE_W23_LO, WISE_W23_LO]
         rect_y = [WISE_W12_LO, WISE_W12_LO, WISE_W12_HI, WISE_W12_HI, WISE_W12_LO]
-        ax.plot(rect_x, rect_y, "b--", lw=1.2, label="Selection box")
-        ax.set_xlabel("W2 − W3 [Vega mag]")
-        ax.set_ylabel("W1 − W2 [Vega mag]")
-        ax.set_title("WISE colour-colour: quasar locus selection (ERO sources)")
-        ax.legend(markerscale=3, fontsize=9)
+        ax.plot(rect_x, rect_y, "b--", lw=1.5, label="Selection box")
+        ax.set_xlabel("W2 − W3 [Vega mag]", fontsize=12)
+        ax.set_ylabel("W1 − W2 [Vega mag]", fontsize=12)
+        ax.set_title("WISE colour-colour: ERO sources (AllWISE Vega)", fontsize=12)
+        ax.legend(markerscale=2.5, fontsize=9)
         fig.tight_layout()
         fig.savefig(PLOT_DIR / "01_wise_color_color.png", dpi=150)
         plt.close(fig)
+        print("  saved 01_wise_color_color.png")
 
-        # ROC + PR
+        # ------------------------------------------------------------------
+        # 02  ROC + PR curves
+        # ------------------------------------------------------------------
         fpr, tpr, _ = roc_curve(y_te, prob_te)
         prec, rec, _ = precision_recall_curve(y_te, prob_te)
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-        axes[0].plot(fpr, tpr)
-        axes[0].plot([0, 1], [0, 1], "k--", lw=0.7)
+        axes[0].plot(fpr, tpr, color=C_QSO, lw=1.8)
+        axes[0].plot([0, 1], [0, 1], "k--", lw=0.8)
         axes[0].set_xlabel("FPR"); axes[0].set_ylabel("TPR")
-        axes[0].set_title(f"ROC  AUC={auc:.3f}")
-        axes[1].plot(rec, prec)
+        axes[0].set_title(f"ROC  AUC = {auc:.3f}")
+        axes[1].plot(rec, prec, color=C_QSO, lw=1.8)
+        axes[1].axhline(y_te.mean(), color="k", linestyle="--", lw=0.8,
+                        label=f"Baseline (prevalence={y_te.mean():.3f})")
         axes[1].set_xlabel("Recall"); axes[1].set_ylabel("Precision")
-        axes[1].set_title(f"PR  AP={ap:.3f}")
+        axes[1].set_title(f"Precision-Recall  AP = {ap:.3f}")
+        axes[1].legend(fontsize=8)
+        fig.suptitle("Quasar locus classifier — test set", fontsize=11)
         fig.tight_layout()
         fig.savefig(PLOT_DIR / "02_roc_pr.png", dpi=150)
         plt.close(fig)
+        print("  saved 02_roc_pr.png")
 
-        # Feature importance
+        # ------------------------------------------------------------------
+        # 03  Feature importance (gain)
+        # ------------------------------------------------------------------
         top = fi_df.head(16)
+        clean_names = [f.replace("feat_", "") for f in top["feature"]]
         fig, ax = plt.subplots(figsize=(7, 5))
-        ax.barh(top["feature"][::-1], top["gain"][::-1])
-        ax.set_xlabel("Gain")
+        bars = ax.barh(clean_names[::-1], top["gain"].values[::-1], color=C_QSO)
+        ax.set_xlabel("XGBoost gain")
         ax.set_title("Feature importance — WISE quasar locus classifier")
         fig.tight_layout()
         fig.savefig(PLOT_DIR / "03_feature_importance.png", dpi=150)
         plt.close(fig)
+        print("  saved 03_feature_importance.png")
+
+        # ------------------------------------------------------------------
+        # 04  Feature distributions: quasar vs non-quasar (test set)
+        # ------------------------------------------------------------------
+        X_te_df = pd.DataFrame(
+            X_te / np.where(feat_iqr > 0, 1.0, 1.0),  # already scaled
+            columns=feature_cols
+        )
+        short = [f.replace("feat_", "") for f in feature_cols]
+        n_feat = len(feature_cols)
+        ncols = 4
+        nrows = int(np.ceil(n_feat / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(14, nrows * 2.2))
+        axes = axes.flatten()
+        qso_mask  = y_te == 1
+        non_mask  = y_te == 0
+        for k, (fc, name) in enumerate(zip(feature_cols, short)):
+            ax = axes[k]
+            vals_q = X_te_df[fc].values[qso_mask]
+            vals_n = X_te_df[fc].values[non_mask]
+            lo = np.nanpercentile(np.concatenate([vals_q, vals_n]), 1)
+            hi = np.nanpercentile(np.concatenate([vals_q, vals_n]), 99)
+            bins = np.linspace(lo, hi, 35)
+            ax.hist(vals_n, bins=bins, density=True, alpha=0.5, color=C_NON, label="non-QSO")
+            ax.hist(vals_q, bins=bins, density=True, alpha=0.7, color=C_QSO, label="QSO locus")
+            ax.set_title(name, fontsize=8)
+            ax.tick_params(labelsize=6)
+        for k in range(n_feat, len(axes)):
+            axes[k].set_visible(False)
+        axes[0].legend(fontsize=7)
+        fig.suptitle("Gaia 16D feature distributions: QSO locus vs non-QSO (test, scaled)", fontsize=10)
+        fig.tight_layout()
+        fig.savefig(PLOT_DIR / "04_feature_distributions.png", dpi=150)
+        plt.close(fig)
+        print("  saved 04_feature_distributions.png")
+
+        # ------------------------------------------------------------------
+        # 05  XGB predicted probability distribution
+        # ------------------------------------------------------------------
+        prob_tr_full = booster.predict(dtrain)
+        fig, ax = plt.subplots(figsize=(7, 4))
+        bins_p = np.linspace(0, 1, 50)
+        ax.hist(prob_te[y_te == 0], bins=bins_p, density=True, alpha=0.5,
+                color=C_NON, label="non-QSO (test)")
+        ax.hist(prob_te[y_te == 1], bins=bins_p, density=True, alpha=0.7,
+                color=C_QSO, label="QSO locus (test)")
+        ax.set_xlabel("XGB predicted probability")
+        ax.set_ylabel("Density")
+        ax.set_title("Score distribution — quasar locus classifier")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(PLOT_DIR / "05_score_distribution.png", dpi=150)
+        plt.close(fig)
+        print("  saved 05_score_distribution.png")
+
+        # ------------------------------------------------------------------
+        # Save XGB scores for all sources (for UMAP overlay and future reuse)
+        # ------------------------------------------------------------------
+        X_all = df[feature_cols].to_numpy(dtype=np.float32)
+        X_all_scaled = (X_all - feat_min) / np.where(feat_iqr > 0, feat_iqr, 1.0)
+        prob_all = booster.predict(xgb.DMatrix(X_all_scaled, feature_names=feature_cols))
+        scores_df = pd.DataFrame({
+            "source_id": df["source_id"].to_numpy(),
+            "label":     label_arr,
+            "xgb_score": prob_all,
+            "w1_w2":     df["w1_w2"].to_numpy(),
+            "w2_w3":     df["w2_w3"].to_numpy(),
+        })
+        scores_df.to_csv(OUT_DIR / "scores_all.csv", index=False)
+        print(f"  saved scores_all.csv ({len(scores_df)} rows)")
+
+        # ------------------------------------------------------------------
+        # 06  Overlay on existing 16D UMAP
+        # ------------------------------------------------------------------
+        EMB_16D = (BASE / "output" / "experiments" / "embeddings"
+                   / "umap16d_manualv8_filtered" / "embedding_umap.csv")
+        print(f"  loading 16D UMAP from {EMB_16D.name}...")
+        umap16 = pd.read_csv(EMB_16D, usecols=["source_id", "x", "y"], low_memory=False)
+        umap16["source_id"] = pd.to_numeric(umap16["source_id"], errors="coerce").astype("Int64")
+        scores_df["source_id"] = scores_df["source_id"].astype("Int64")
+        merged16 = umap16.merge(scores_df, on="source_id", how="left")
+
+        in_locus = merged16["label"] == 1
+        has_wise = merged16["label"].notna()
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+        # (a) label
+        ax = axes[0]
+        ax.scatter(merged16.loc[~in_locus, "x"], merged16.loc[~in_locus, "y"],
+                   s=0.5, alpha=0.06, color="#555555", rasterized=True)
+        ax.scatter(merged16.loc[in_locus, "x"], merged16.loc[in_locus, "y"],
+                   s=25, alpha=1.0, color="#ff007f", rasterized=True, zorder=5,
+                   edgecolors="white", linewidths=0.4,
+                   label=f"WISE QSO locus (n={in_locus.sum()})")
+        ax.set_title("(a) WISE quasar locus label", fontsize=10)
+        ax.legend(markerscale=1.5, fontsize=8, loc="best",
+                  framealpha=0.85, edgecolor="none")
+        ax.set_xticks([]); ax.set_yticks([])
+
+        # (b) XGB score — grey for unmatched, plasma for WISE-matched
+        ax = axes[1]
+        bg = merged16["xgb_score"].isna()
+        ax.scatter(merged16.loc[bg, "x"], merged16.loc[bg, "y"],
+                   s=0.5, alpha=0.06, color="#555555", rasterized=True)
+        sc = ax.scatter(merged16.loc[~bg, "x"], merged16.loc[~bg, "y"],
+                        s=3, c=merged16.loc[~bg, "xgb_score"],
+                        cmap="RdPu", alpha=0.8, vmin=0, vmax=1,
+                        rasterized=True, zorder=4)
+        plt.colorbar(sc, ax=ax, label="XGB P(quasar)")
+        ax.set_title("(b) XGB predicted P(quasar)", fontsize=10)
+        ax.set_xticks([]); ax.set_yticks([])
+
+        fig.suptitle("16D Gaia UMAP — WISE quasar locus overlay", fontsize=12)
+        fig.tight_layout()
+        fig.savefig(PLOT_DIR / "06_umap16d_quasar_overlay.png", dpi=150)
+        plt.close(fig)
+        print("  saved 06_umap16d_quasar_overlay.png")
+
+        # ------------------------------------------------------------------
+        # 07  Overlay on existing pixel UMAP
+        # ------------------------------------------------------------------
+        EMB_PIX = (BASE / "output" / "experiments" / "embeddings"
+                   / "double_stars_pixels"
+                   / "pixels_umap_standard_manualv8_filtered"
+                   / "umap_standard" / "embedding_umap.csv")
+        print(f"  loading pixel UMAP from {EMB_PIX.parent.parent.name}/...")
+        umap_pix = pd.read_csv(EMB_PIX, usecols=["source_id", "x", "y"], low_memory=False)
+        umap_pix["source_id"] = pd.to_numeric(umap_pix["source_id"], errors="coerce").astype("Int64")
+        merged_pix = umap_pix.merge(scores_df, on="source_id", how="left")
+
+        in_locus_p = merged_pix["label"] == 1
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+        ax = axes[0]
+        ax.scatter(merged_pix.loc[~in_locus_p, "x"], merged_pix.loc[~in_locus_p, "y"],
+                   s=0.5, alpha=0.06, color="#555555", rasterized=True)
+        ax.scatter(merged_pix.loc[in_locus_p, "x"], merged_pix.loc[in_locus_p, "y"],
+                   s=25, alpha=1.0, color="#ff007f", rasterized=True, zorder=5,
+                   edgecolors="white", linewidths=0.4,
+                   label=f"WISE QSO locus (n={in_locus_p.sum()})")
+        ax.set_title("(a) WISE quasar locus label", fontsize=10)
+        ax.legend(markerscale=1.5, fontsize=8, loc="best",
+                  framealpha=0.85, edgecolor="none")
+        ax.set_xticks([]); ax.set_yticks([])
+
+        ax = axes[1]
+        bg_p = merged_pix["xgb_score"].isna()
+        ax.scatter(merged_pix.loc[bg_p, "x"], merged_pix.loc[bg_p, "y"],
+                   s=0.5, alpha=0.06, color="#555555", rasterized=True)
+        sc = ax.scatter(merged_pix.loc[~bg_p, "x"], merged_pix.loc[~bg_p, "y"],
+                        s=3, c=merged_pix.loc[~bg_p, "xgb_score"],
+                        cmap="RdPu", alpha=0.8, vmin=0, vmax=1,
+                        rasterized=True, zorder=4)
+        plt.colorbar(sc, ax=ax, label="XGB P(quasar)")
+        ax.set_title("(b) XGB predicted P(quasar)", fontsize=10)
+        ax.set_xticks([]); ax.set_yticks([])
+
+        fig.suptitle("Pixel UMAP — WISE quasar locus overlay", fontsize=12)
+        fig.tight_layout()
+        fig.savefig(PLOT_DIR / "07_umap_pixel_quasar_overlay.png", dpi=150)
+        plt.close(fig)
+        print("  saved 07_umap_pixel_quasar_overlay.png")
 
         print(f"\nOutputs -> {OUT_DIR}")
         print(f"Plots   -> {PLOT_DIR}")

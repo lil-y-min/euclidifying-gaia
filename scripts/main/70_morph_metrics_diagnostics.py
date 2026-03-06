@@ -212,6 +212,7 @@ def _density_panel(
     name: str,
     mode: str,   # "raw" | "col" | "row"
     n_bins: int = 60,
+    vmax_pct: int = 99,
 ) -> None:
     """
     Draw one 2D density panel.
@@ -250,7 +251,7 @@ def _density_panel(
     H = np.log1p(H)
 
     # imshow: H is (x_bins, y_bins) but imshow plots (row=y, col=x)
-    vmax = np.percentile(H[H > 0], 95) if np.any(H > 0) else H.max()
+    vmax = np.percentile(H[H > 0], vmax_pct) if np.any(H > 0) else H.max()
     im = ax.imshow(
         H.T,
         origin="lower",
@@ -274,6 +275,7 @@ def plot_density_scatter(
     Y_pred: np.ndarray,
     mode: str,
     out_path: Path,
+    vmax_pct: int = 99,
 ) -> None:
     titles = {
         "raw": "2D density (log scale)",
@@ -287,7 +289,7 @@ def plot_density_scatter(
 
     for i, name in enumerate(METRIC_NAMES):
         ax = axes[i]
-        _density_panel(ax, Y_test[:, i], Y_pred[:, i], name, mode=mode)
+        _density_panel(ax, Y_test[:, i], Y_pred[:, i], name, mode=mode, vmax_pct=vmax_pct)
         ax.set_title(name, fontsize=9, fontweight="bold")
 
     for j in range(len(METRIC_NAMES), len(axes)):
@@ -354,16 +356,24 @@ def main() -> None:
     )
 
     # ---- Density scatter plots ----
-    print("Plot 5: Density scatter (raw) ...")
-    plot_density_scatter(Y_test, Y_pred, mode="raw",
+    print("Plot 5: Density scatter (raw, p99) ...")
+    plot_density_scatter(Y_test, Y_pred, mode="raw", vmax_pct=99,
                          out_path=plots_root / "08_density_scatter_raw.png")
 
-    print("Plot 6: Density scatter (column-normalized, P(pred|true)) ...")
-    plot_density_scatter(Y_test, Y_pred, mode="col",
+    print("Plot 5b: Density scatter (raw, p95) ...")
+    plot_density_scatter(Y_test, Y_pred, mode="raw", vmax_pct=95,
+                         out_path=plots_root / "08b_density_scatter_raw_p95.png")
+
+    print("Plot 6: Density scatter (column-normalized, P(pred|true), p99) ...")
+    plot_density_scatter(Y_test, Y_pred, mode="col", vmax_pct=99,
                          out_path=plots_root / "09_density_scatter_col_norm.png")
 
-    print("Plot 7: Density scatter (row-normalized, P(true|pred)) ...")
-    plot_density_scatter(Y_test, Y_pred, mode="row",
+    print("Plot 6b: Density scatter (column-normalized, P(pred|true), p95) ...")
+    plot_density_scatter(Y_test, Y_pred, mode="col", vmax_pct=95,
+                         out_path=plots_root / "09b_density_scatter_col_norm_p95.png")
+
+    print("Plot 7: Density scatter (row-normalized, P(true|pred), p95) ...")
+    plot_density_scatter(Y_test, Y_pred, mode="row", vmax_pct=95,
                          out_path=plots_root / "10_density_scatter_row_norm.png")
 
     print("\nDone.")

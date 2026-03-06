@@ -176,6 +176,14 @@ def positive_integral(stamps: np.ndarray, use_positive_only: bool) -> np.ndarray
     return np.sum(s, axis=(1, 2))
 
 
+def is_border_stamp(stamp_raw: np.ndarray) -> bool:
+    """True if any complete row or column is all <= 0 (detector edge clipping)."""
+    return (
+        bool(np.any(np.all(stamp_raw <= 0, axis=1))) or   # any row
+        bool(np.any(np.all(stamp_raw <= 0, axis=0)))       # any column
+    )
+
+
 def normalize_stamps(
     stamps: np.ndarray,
     use_positive_only: bool = True,
@@ -480,6 +488,20 @@ def load_all_data(
             ok_meta = meta_idx[file_ok]
             ok_file = file_indices[file_ok].astype(int)
             all_stamps_raw[ok_meta] = data[ok_file]
+
+        # --- Filter border stamps (detector-edge clipping) ---
+        border_bad = np.array([
+            is_border_stamp(all_stamps_raw[i]) if valid[i] else False
+            for i in range(nrows)
+        ])
+        n_border = int(border_bad[valid].sum())
+        if n_border > 0:
+            print(f"  Removed {n_border} border-clipped stamps.")
+        valid &= ~border_bad
+        valid_idx = np.where(valid)[0]
+        if len(valid_idx) == 0:
+            print("  No valid rows after border filter — skipping.")
+            continue
 
         # --- Normalize ---
         stamps_norm, norm_ok, integ = normalize_stamps(
