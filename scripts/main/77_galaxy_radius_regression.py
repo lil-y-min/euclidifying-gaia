@@ -54,7 +54,7 @@ BASE = Path(__file__).resolve().parents[2]
 DATASET_ROOT = BASE / "output" / "dataset_npz"
 RUN_NAME = "galaxy_radius_reg"
 OUT_DIR = BASE / "output" / "ml_runs" / RUN_NAME
-PLOT_DIR = BASE / "plots" / "ml_runs" / RUN_NAME
+PLOT_DIR = BASE / "report" / "model_decision" / "20260311_galaxy_radius_regression"
 META_NAME = "metadata_16d.csv"
 FEATURE_SET = "16D"
 
@@ -213,9 +213,10 @@ def main() -> None:
         print(f"  {gname}: n={per_gal[gname]['n']}  R²={per_gal[gname]['r2']:.3f}  RMSE={per_gal[gname]['rmse']:.3f}")
 
     metrics = {
-        "r2": r2, "rmse": rmse, "pearson_r": r, "pearson_p": p,
+        "r2": float(r2), "rmse": float(rmse),
+        "pearson_r": float(r), "pearson_p": float(p),
         "n_test": int(len(y_te)),
-        "best_iteration": booster.best_iteration,
+        "best_iteration": int(booster.best_iteration),
         "per_galaxy": per_gal,
     }
     (OUT_DIR / "metrics.json").write_text(json.dumps(metrics, indent=2))

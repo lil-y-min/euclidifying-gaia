@@ -65,7 +65,7 @@ RUN_NAME     = "quaia_clf"
 OUT_DIR      = BASE / "output" / "ml_runs" / RUN_NAME
 PLOT_DIR     = BASE / "plots"  / "ml_runs" / RUN_NAME
 META_NAME    = "metadata_16d.csv"
-FEATURE_SET  = "16D"
+FEATURE_SET  = "15D"
 
 QUAIA_FITS   = BASE / "data" / "quaia_G20.5.fits"
 
@@ -460,7 +460,7 @@ def main() -> None:
     axes[1].set_xlabel("Recall"); axes[1].set_ylabel("Precision")
     axes[1].set_title(f"PR  AP = {ap:.3f}")
     axes[1].legend(fontsize=8)
-    fig.suptitle("Quaia quasar classifier — test set", fontsize=11)
+    fig.suptitle("Quaia quasar classifier (15D) — test set", fontsize=11)
     fig.tight_layout()
     fig.savefig(PLOT_DIR / "01_roc_pr.png", dpi=150)
     plt.close(fig)
@@ -472,7 +472,7 @@ def main() -> None:
     ax.barh([f.replace("feat_", "") for f in top["feature"]][::-1],
             top["gain"].values[::-1], color=C_QSO)
     ax.set_xlabel("XGBoost gain")
-    ax.set_title("Feature importance — Quaia quasar classifier")
+    ax.set_title("Feature importance — Quaia quasar classifier (15D)")
     fig.tight_layout()
     fig.savefig(PLOT_DIR / "02_feature_importance.png", dpi=150)
     plt.close(fig)
@@ -503,7 +503,7 @@ def main() -> None:
 
     # 04 + 05  UMAP overlays
     umap_overlay(EMB_16D, scores_df,
-                 "16D Gaia UMAP — Quaia confirmed quasars",
+                 "15D Gaia UMAP — Quaia confirmed quasars",
                  PLOT_DIR / "04_umap16d_quaia_overlay.png")
     umap_overlay(EMB_PIX, scores_df,
                  "Pixel UMAP — Quaia confirmed quasars",

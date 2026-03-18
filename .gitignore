@@ -11,3 +11,12 @@ output/
 plots/
 data/
 report/
+deliverables/
+
+# IDE and tool state
+.claude/
+.vscode/
+tempCodeRunnerFile.*
+
+# NFS lock files (should never be committed)
+.nfs*

@@ -70,7 +70,7 @@ RUN_NAME = "quasar_wise_clf"
 OUT_DIR  = BASE / "output" / "ml_runs" / RUN_NAME
 PLOT_DIR = BASE / "plots"   / "ml_runs" / RUN_NAME
 META_NAME   = "metadata_16d.csv"
-FEATURE_SET = "16D"
+FEATURE_SET = "15D"
 WISE_CSV    = OUT_DIR / "wise_phot.csv"
 
 # WSDB AllWISE table
@@ -314,7 +314,7 @@ def main() -> None:
         print(f"  Outside locus (label=0): {n_tot - n_qso}")
         print(f"  Total with S/N cuts:     {n_tot}")
 
-        print("Merging with Gaia 16D features...")
+        print("Merging with Gaia 15D features...")
         df_meta = load_all_fields(feature_cols)
         df_meta["source_id"] = pd.to_numeric(df_meta["source_id"], errors="coerce").astype("Int64")
         df_wise["source_id"] = pd.to_numeric(df_wise["source_id"], errors="coerce").astype("Int64")
@@ -426,7 +426,7 @@ def main() -> None:
         axes[1].set_xlabel("Recall"); axes[1].set_ylabel("Precision")
         axes[1].set_title(f"Precision-Recall  AP = {ap:.3f}")
         axes[1].legend(fontsize=8)
-        fig.suptitle("Quasar locus classifier — test set", fontsize=11)
+        fig.suptitle("Quasar locus classifier (15D) — test set", fontsize=11)
         fig.tight_layout()
         fig.savefig(PLOT_DIR / "02_roc_pr.png", dpi=150)
         plt.close(fig)
@@ -440,7 +440,7 @@ def main() -> None:
         fig, ax = plt.subplots(figsize=(7, 5))
         bars = ax.barh(clean_names[::-1], top["gain"].values[::-1], color=C_QSO)
         ax.set_xlabel("XGBoost gain")
-        ax.set_title("Feature importance — WISE quasar locus classifier")
+        ax.set_title("Feature importance — WISE quasar locus classifier (15D)")
         fig.tight_layout()
         fig.savefig(PLOT_DIR / "03_feature_importance.png", dpi=150)
         plt.close(fig)
@@ -475,7 +475,7 @@ def main() -> None:
         for k in range(n_feat, len(axes)):
             axes[k].set_visible(False)
         axes[0].legend(fontsize=7)
-        fig.suptitle("Gaia 16D feature distributions: QSO locus vs non-QSO (test, scaled)", fontsize=10)
+        fig.suptitle("Gaia 15D feature distributions: QSO locus vs non-QSO (test, scaled)", fontsize=10)
         fig.tight_layout()
         fig.savefig(PLOT_DIR / "04_feature_distributions.png", dpi=150)
         plt.close(fig)
@@ -558,7 +558,7 @@ def main() -> None:
         ax.set_title("(b) XGB predicted P(quasar)", fontsize=10)
         ax.set_xticks([]); ax.set_yticks([])
 
-        fig.suptitle("16D Gaia UMAP — WISE quasar locus overlay", fontsize=12)
+        fig.suptitle("15D Gaia UMAP — WISE quasar locus overlay", fontsize=12)
         fig.tight_layout()
         fig.savefig(PLOT_DIR / "06_umap16d_quasar_overlay.png", dpi=150)
         plt.close(fig)

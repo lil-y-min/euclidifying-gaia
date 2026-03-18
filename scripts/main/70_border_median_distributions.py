@@ -123,52 +123,6 @@ def _kde_curve(values: np.ndarray, x_grid: np.ndarray, bw: str | float = "scott"
         return np.zeros_like(x_grid)
 
 
-def plot_counts_log(
-    field_data: Dict[str, np.ndarray],
-    out_png: Path,
-    title: str,
-    nbins: int = 200,
-    xlim: Tuple[float, float] | None = None,
-    highlight: List[str] | None = None,
-) -> None:
-    """Histogram of per-stamp border medians, log count y-axis."""
-    all_vals = np.concatenate([v for v in field_data.values() if v.size])
-    lo = float(np.percentile(all_vals, 0.1)) if xlim is None else xlim[0]
-    hi = float(np.percentile(all_vals, 99.9)) if xlim is None else xlim[1]
-    bin_edges = np.linspace(lo, hi, nbins + 1)
-    x = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-
-    fig, ax = plt.subplots(figsize=(11, 6))
-    rest = [f for f in field_data if highlight is None or f not in highlight]
-    for fname in rest:
-        vals = field_data[fname]
-        if vals.size == 0:
-            continue
-        counts, _ = np.histogram(vals, bins=bin_edges)
-        color = "#aaaaaa" if highlight else None
-        alpha = 0.25 if highlight else 0.55
-        ax.plot(x, counts, lw=0.9, alpha=alpha, color=color)
-    if highlight:
-        cmap = plt.get_cmap("tab10", max(1, len(highlight)))
-        for i, fname in enumerate(highlight):
-            vals = field_data[fname]
-            if vals.size == 0:
-                continue
-            counts, _ = np.histogram(vals, bins=bin_edges)
-            ax.plot(x, counts, lw=2.2, alpha=0.92, color=cmap(i), label=fname)
-        ax.legend(fontsize=8, loc="best", frameon=True)
-    ax.set_yscale("log")
-    ax.set_xlabel("Border-pixel median per stamp  [ADU]")
-    ax.set_ylabel("Count (log scale)")
-    ax.set_title(title)
-    if xlim is not None:
-        ax.set_xlim(*xlim)
-    ax.grid(alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-
-
 def plot_kde_all(
     field_data: Dict[str, np.ndarray],
     x_grid: np.ndarray,
@@ -198,7 +152,6 @@ def plot_kde_all(
 
     ax.set_xlabel("Border-pixel median per stamp  [ADU]")
     ax.set_ylabel("Density (KDE)")
-    ax.set_yscale("log")
     if xlim is not None:
         ax.set_xlim(*xlim)
     ax.grid(alpha=0.25)
@@ -214,19 +167,17 @@ def plot_hist_overlay(
     title: str,
     xlim: Tuple[float, float] | None = None,
 ) -> None:
-    """Overlaid KDE curves of raw border pixel values, one per field."""
-    lo = float(bin_edges[0])
-    hi = float(bin_edges[-1])
-    x_grid = np.linspace(lo, hi, 800)
-
+    """Overlaid normalised histograms of raw border pixel values."""
     fig, ax = plt.subplots(figsize=(11, 6))
     for fname, vals in field_pixs.items():
-        if vals.size < 3:
+        if vals.size == 0:
             continue
-        y = _kde_curve(vals, x_grid, bw="scott")
-        ax.plot(x_grid, y, lw=1.1, alpha=0.55, label=fname)
+        counts, _ = np.histogram(vals, bins=bin_edges)
+        norm = counts / max(1, counts.sum())
+        x = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        ax.plot(x, norm, lw=0.9, alpha=0.45)
     ax.set_xlabel("Border pixel intensity  [ADU]")
-    ax.set_ylabel("Density (KDE)")
+    ax.set_ylabel("Normalised count")
     ax.set_title(title)
     ax.set_yscale("log")
     if xlim is not None:
@@ -316,31 +267,39 @@ def main() -> None:
     # build a fine x_grid covering at least the zoom range
     x_grid_zoom = np.linspace(args.zoom_lo, args.zoom_hi, args.kde_points)
 
-    # Count histograms with log y-scale — zoomed and full range
-    plot_counts_log(
-        field_data=field_meds,
-        out_png=outdir / "border_median_counts_log_zoom.png",
-        title=f"Border-pixel median — log counts, all fields, zoom [{args.zoom_lo:.0f}, {args.zoom_hi:.0f}] ADU  (bw={args.border_width} px)",
-        xlim=zoom_xlim,
-    )
-    plot_counts_log(
-        field_data=field_meds,
-        out_png=outdir / "border_median_counts_log_full.png",
-        title=f"Border-pixel median — log counts, all fields, full range  (bw={args.border_width} px)",
-    )
-
-    # KDE — all fields, full and zoomed
+    # Plot 1: all fields, no highlight — full range
     plot_kde_all(
         field_data=field_meds,
         x_grid=x_grid,
         out_png=outdir / "border_median_kde_all.png",
         title=f"Border-pixel median distributions — all fields  (border_width={args.border_width} px)",
     )
+
+    # Plot 1b: all fields — zoom
     plot_kde_all(
         field_data=field_meds,
         x_grid=x_grid_zoom,
         out_png=outdir / "border_median_kde_all_zoom.png",
         title=f"Border-pixel median distributions — all fields, zoom [{args.zoom_lo:.0f}, {args.zoom_hi:.0f}] ADU  (bw={args.border_width} px)",
+        xlim=zoom_xlim,
+    )
+
+    # Plot 2: top-k highlighted — full range
+    plot_kde_all(
+        field_data=field_meds,
+        x_grid=x_grid,
+        out_png=outdir / "border_median_kde_topk.png",
+        title=f"Border-pixel median distributions — top-{args.top_k} most-shifted highlighted  (bw={args.border_width} px)",
+        highlight=top_fields,
+    )
+
+    # Plot 2b: top-k highlighted — zoom
+    plot_kde_all(
+        field_data=field_meds,
+        x_grid=x_grid_zoom,
+        out_png=outdir / "border_median_kde_topk_zoom.png",
+        title=f"Border-pixel median distributions — top-{args.top_k} highlighted, zoom [{args.zoom_lo:.0f}, {args.zoom_hi:.0f}] ADU",
+        highlight=top_fields,
         xlim=zoom_xlim,
     )
 
@@ -355,7 +314,7 @@ def main() -> None:
             bin_edges=bin_edges,
             out_png=outdir / "border_median_hist_raw_zoom.png",
             title=f"Raw border pixel distributions by field  (border_width={args.border_width} px)  [zoom]",
-            xlim=(-1.0, 100.0),
+            xlim=(-100.0, 400.0),
         )
         plot_hist_overlay(
             field_pixs=field_pixs,

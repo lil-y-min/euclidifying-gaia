@@ -2,12 +2,17 @@
 Shared Gaia feature schema definitions.
 
 Canonical naming:
-- 8D: base compact feature set
+- 8D:  base compact feature set
 - 10D: 8D + phot_g_mean_mag + bp_rp
+- 15D: 16D minus feat_visibility_periods_used (preferred for thesis)
 - 16D: 8D + 8 additional Gaia quality/contamination metrics
 
 Backward compatibility:
 - "17D" is accepted as an alias for "16D".
+
+Note: feat_visibility_periods_used is excluded from 15D because it
+correlates with the Gaia scanning law (a survey strategy artefact),
+not intrinsic source properties, making it an unreliable feature.
 """
 
 from __future__ import annotations
@@ -71,13 +76,19 @@ GAIA_BACKFILL_TARGET_COLS: List[str] = [
 ]
 
 
+# 15D: 16D without feat_visibility_periods_used (scanning-law confound removed)
+Y_FEATURE_COLS_15D: List[str] = [
+    c for c in Y_FEATURE_COLS_16D if c != "feat_visibility_periods_used"
+]
+
+
 def normalize_feature_set(feature_set: str) -> str:
     fs = str(feature_set).upper()
     if fs == "17D":
         return "16D"
-    if fs in ("8D", "10D", "16D"):
+    if fs in ("8D", "10D", "15D", "16D"):
         return fs
-    raise ValueError("FEATURE_SET must be '8D', '10D', or '16D' (legacy alias: '17D').")
+    raise ValueError("FEATURE_SET must be '8D', '10D', '15D', or '16D' (legacy alias: '17D').")
 
 
 def get_feature_cols(feature_set: str) -> List[str]:
@@ -86,6 +97,8 @@ def get_feature_cols(feature_set: str) -> List[str]:
         return Y_FEATURE_COLS_8D
     if fs == "10D":
         return Y_FEATURE_COLS_10D
+    if fs == "15D":
+        return Y_FEATURE_COLS_15D
     return Y_FEATURE_COLS_16D
 
 
@@ -95,4 +108,5 @@ def scaler_stem(feature_set: str) -> str:
         return "y_feature_iqr_8d"
     if fs == "10D":
         return "y_feature_iqr"
+    # 15D and 16D share the same scaler file; subsetting is done by feature name
     return "y_feature_iqr_16d"

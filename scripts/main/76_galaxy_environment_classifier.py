@@ -57,17 +57,19 @@ PLOT_DIR = BASE / "plots" / "ml_runs" / RUN_NAME
 META_NAME = "metadata_16d.csv"
 FEATURE_SET = "16D"
 
-# Galaxy nuclei: (RA_deg, Dec_deg, R_D25_arcmin, r_eff_arcmin, field_tag)
-# R_D25 = half the optical D25 diameter (from NED/HyperLeda).
-# r_eff = effective (half-light) radius in arcmin.
+# Galaxy nuclei — elliptical apertures from HyperLEDA.
+# a_arcmin : semi-major axis = 10^(logd25)*0.1/2  (arcmin)
+# b_arcmin : semi-minor axis = a / 10^(logr25)     (arcmin)
+# pa_deg   : major-axis position angle, N→E         (degrees)
+# r_eff    : effective (half-light) radius           (arcmin)
 BIG_GALAXY_TABLE = [
-    # name           RA          Dec        R_D25   r_eff   field_tag
-    ("IC342",       56.6988,    68.0961,   10.7,   2.7,   "ERO-IC342"),
-    ("NGC6744",    287.4421,   -63.8575,    7.75,  2.0,   "ERO-NGC6744"),
-    ("NGC2403",    114.2142,    65.6031,   10.95,  3.0,   "ERO-NGC2403"),
-    ("NGC6822",    296.2404,   -14.8031,    7.75,  3.0,   "ERO-NGC6822"),
-    ("HolmbergII", 124.7708,    70.7219,    3.95,  1.2,   "ERO-HolmbergII"),
-    ("IC10",         5.0721,    59.3039,    3.15,  1.0,   "ERO-IC10"),
+    # name          RA          Dec        a_arcmin  b_arcmin  pa_deg  r_eff  field_tag
+    ("IC342",       56.6988,    68.0961,   9.976,    9.527,    0.0,    2.7,   "ERO-IC342"),
+    ("NGC6744",    287.4421,   -63.8575,   7.744,    4.775,   13.7,   2.0,   "ERO-NGC6744"),
+    ("NGC2403",    114.2142,    65.6031,   9.976,    5.000,  126.3,   3.0,   "ERO-NGC2403"),
+    ("NGC6822",    296.2404,   -14.8031,   7.744,    7.396,    0.0,   3.0,   "ERO-NGC6822"),
+    ("HolmbergII", 124.7708,    70.7219,   3.972,    2.812,   15.2,   1.2,   "ERO-HolmbergII"),
+    ("IC10",         5.0721,    59.3039,   3.380,    3.013,  129.0,   1.0,   "ERO-IC10"),
 ]
 
 # Fields that serve purely as "outside" negatives (no big galaxy host).
@@ -112,12 +114,26 @@ def load_scaler(feature_cols: list[str]) -> tuple[np.ndarray, np.ndarray]:
 
 
 def build_galaxy_coords() -> list[tuple]:
-    """Return list of (name, SkyCoord, R_D25_arcmin, r_eff_arcmin, field_tag)."""
+    """Return list of (name, SkyCoord, a, b, pa_deg, r_eff, field_tag)."""
     out = []
-    for name, ra, dec, r_d25, r_eff, tag in BIG_GALAXY_TABLE:
+    for name, ra, dec, a, b, pa, r_eff, tag in BIG_GALAXY_TABLE:
         sc = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
-        out.append((name, sc, r_d25, r_eff, tag))
+        out.append((name, sc, a, b, pa, r_eff, tag))
     return out
+
+
+def elliptical_radius(ra_src, dec_src, ra0, dec0, a, b, pa_deg):
+    """
+    Normalised elliptical radius (0=nucleus, 1=D25 boundary).
+    pa_deg: major-axis position angle, North toward East.
+    Returns array of same shape as ra_src.
+    """
+    pa_rad = np.radians(pa_deg)
+    d_alpha = (ra_src - ra0) * np.cos(np.radians(dec0)) * 60.0  # arcmin, East+
+    d_delta = (dec_src - dec0) * 60.0                            # arcmin, North+
+    x_maj = d_alpha * np.sin(pa_rad) + d_delta * np.cos(pa_rad)
+    x_min = d_alpha * np.cos(pa_rad) - d_delta * np.sin(pa_rad)
+    return np.sqrt((x_maj / a) ** 2 + (x_min / b) ** 2)
 
 
 def load_all_fields(feature_cols: list[str]) -> pd.DataFrame:
@@ -144,13 +160,14 @@ def assign_labels(df: pd.DataFrame, galaxies: list) -> pd.DataFrame:
     - If in a pure-outside field: label=0.
     - Else: drop (field not in either category).
     """
-    galaxy_tags = {g[4] for g in galaxies}
+    galaxy_tags = {g[6] for g in galaxies}  # (name, sc, a, b, pa, r_eff, tag)
     keep_mask = df["field_tag"].isin(galaxy_tags | OUTSIDE_FIELDS)
     df = df[keep_mask].copy()
 
     df["label_inside"] = 0
-    df["sep_arcmin"] = np.nan
-    df["r_norm"] = np.nan  # sep / r_eff (for use in script 77)
+    df["sep_arcmin"] = np.nan      # circular separation (kept for radial plots)
+    df["ell_radius"] = np.nan      # normalised elliptical radius (1 = D25 boundary)
+    df["r_norm"] = np.nan          # sep / r_eff (for script 77)
 
     src_coords = SkyCoord(
         ra=df["ra"].to_numpy() * u.deg,
@@ -158,15 +175,21 @@ def assign_labels(df: pd.DataFrame, galaxies: list) -> pd.DataFrame:
         frame="icrs",
     )
 
-    for name, gal_coord, r_d25, r_eff, tag in galaxies:
+    for name, gal_coord, a, b, pa, r_eff, tag in galaxies:
         in_field = df["field_tag"] == tag
         if not in_field.any():
             continue
-        seps = src_coords[in_field.to_numpy()].separation(gal_coord).to(u.arcmin).value
         idx = df.index[in_field]
+        ra_s  = df.loc[idx, "ra"].to_numpy()
+        dec_s = df.loc[idx, "dec"].to_numpy()
+        # Circular separation (arcmin) — kept for diagnostics
+        seps = src_coords[in_field.to_numpy()].separation(gal_coord).to(u.arcmin).value
         df.loc[idx, "sep_arcmin"] = seps
         df.loc[idx, "r_norm"] = seps / r_eff
-        df.loc[idx, "label_inside"] = (seps < r_d25).astype(int)
+        # Elliptical containment
+        ell_r = elliptical_radius(ra_s, dec_s, gal_coord.ra.deg, gal_coord.dec.deg, a, b, pa)
+        df.loc[idx, "ell_radius"] = ell_r
+        df.loc[idx, "label_inside"] = (ell_r <= 1.0).astype(int)
 
     return df
 
@@ -200,12 +223,18 @@ def main() -> None:
     X = df[feature_cols].to_numpy(dtype=np.float32)
     X = (X - feat_min) / np.where(feat_iqr > 0, feat_iqr, 1.0)
     y = df["label_inside"].to_numpy(dtype=np.float32)
-    splits = df["split_code"].to_numpy(dtype=int) if "split_code" in df.columns else np.zeros(len(df), dtype=int)
 
-    X_tr, y_tr = X[splits == 0], y[splits == 0]
-    X_vl, y_vl = X[splits == 1], y[splits == 1]
-    X_te, y_te = X[splits == 2], y[splits == 2]
-    print(f"  Train={len(X_tr)}, Val={len(X_vl)}, Test={len(X_te)}")
+    # Always use a dedicated stratified split — the upstream split_code was
+    # designed for stamp reconstruction and does not guarantee inside-galaxy
+    # positives in the test fold.
+    from sklearn.model_selection import train_test_split as tts
+    idx_all = np.arange(len(y))
+    idx_tmp, idx_te = tts(idx_all, test_size=0.20, stratify=y, random_state=42)
+    idx_tr, idx_vl  = tts(idx_tmp, test_size=0.125, stratify=y[idx_tmp], random_state=42)
+    X_tr, y_tr = X[idx_tr], y[idx_tr]
+    X_vl, y_vl = X[idx_vl], y[idx_vl]
+    X_te, y_te = X[idx_te], y[idx_te]
+    print(f"  Train={len(X_tr)} (pos={int(y_tr.sum())}), Val={len(X_vl)} (pos={int(y_vl.sum())}), Test={len(X_te)} (pos={int(y_te.sum())})")
 
     pos_ratio = float((y_tr == 0).sum()) / max(float((y_tr == 1).sum()), 1.0)
     params = {**PARAMS, "scale_pos_weight": pos_ratio}
@@ -274,12 +303,12 @@ def main() -> None:
     # Separation distribution coloured by field
     df_plot = df.dropna(subset=["sep_arcmin"]).copy()
     fig, ax = plt.subplots(figsize=(7, 4))
-    for _, _, r_d25, _, tag in galaxies:
+    for _, _, a, b, pa, r_eff, tag in galaxies:
         sub = df_plot[df_plot["field_tag"] == tag]["sep_arcmin"]
         if len(sub) == 0:
             continue
         ax.hist(sub, bins=60, histtype="step", label=tag.replace("ERO-", ""))
-        ax.axvline(r_d25, linestyle="--", linewidth=0.8, color="gray")
+        ax.axvline(a, linestyle="--", linewidth=0.8, color="gray")
     ax.set_xlabel("Angular separation from nucleus (arcmin)")
     ax.set_ylabel("Sources")
     ax.set_title("Source distribution vs. D25 boundary (dashed)")
